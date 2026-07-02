@@ -1,0 +1,100 @@
+name: Release Android to Google Play
+
+on:
+  workflow_dispatch:
+    inputs:
+      track:
+        description: "Play track or closed-track name"
+        required: true
+        default: internal
+      release_status:
+        description: "Google Play release status"
+        required: true
+        type: choice
+        default: draft
+        options:
+          - draft
+          - inProgress
+          - halted
+          - completed
+      build_number:
+        description: "Optional CI build number override"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      track:
+        required: true
+        type: string
+      release_status:
+        required: true
+        type: string
+      build_number:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+      GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+          bundler-cache: true
+
+      - name: Install Flutter
+        run: bash ./scripts/install_flutter_sdk.sh
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Install Android SDK components
+        run: bash ./scripts/setup_android_sdk.sh
+
+      - name: Resolve build metadata
+        env:
+          APP_BUILD_NUMBER_OVERRIDE: ${{ inputs.build_number }}
+        run: bash ./scripts/resolve_build_metadata.sh
+
+      - name: Install Android signing assets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: bash ./scripts/install_android_signing_assets.sh
+
+      - name: Build signed app bundle
+        run: >
+          flutter build appbundle --release
+          --build-name="$APP_BUILD_NAME"
+          --build-number="$APP_BUILD_NUMBER"
+
+      - name: Upload to Google Play
+        env:
+          ANDROID_AAB_PATH: build/app/outputs/bundle/release/app-release.aab
+        run: >
+          bundle exec fastlane android deploy
+          track:${{ inputs.track }}
+          release_status:${{ inputs.release_status }}
+          aab:build/app/outputs/bundle/release/app-release.aab

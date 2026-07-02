@@ -1,0 +1,30 @@
+name: Validate Flutter Starter
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install Flutter
+        run: bash ./scripts/install_flutter_sdk.sh
+
+      - name: Install Dart and Flutter dependencies
+        run: flutter pub get
+
+      - name: Analyze source
+        run: flutter analyze
+
+      - name: Run widget tests
+        run: flutter test

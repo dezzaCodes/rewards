@@ -1,0 +1,3 @@
+app_identifier(ENV["BUNDLE_ID"]) if ENV["BUNDLE_ID"]
+apple_id(ENV["APP_STORE_APPLE_ID"]) if ENV["APP_STORE_APPLE_ID"]
+package_name(ENV["BUNDLE_ID"]) if ENV["BUNDLE_ID"]

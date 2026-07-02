@@ -1,0 +1,68 @@
+default_platform(:ios)
+
+def truthy?(value)
+  %w[1 true yes y].include?(value.to_s.downcase)
+end
+
+private_lane :app_store_api_key do
+  app_store_connect_api_key(
+    key_id: ENV.fetch("APP_STORE_CONNECT_KEY_ID"),
+    issuer_id: ENV.fetch("APP_STORE_CONNECT_ISSUER_ID"),
+    key_content: ENV.fetch("APP_STORE_CONNECT_API_KEY_BASE64"),
+    is_key_content_base64: true,
+    duration: 1_200,
+    in_house: false
+  )
+end
+
+platform :android do
+  desc "Upload an Android App Bundle to Google Play."
+  lane :deploy do |options|
+    supply(
+      package_name: ENV.fetch("BUNDLE_ID"),
+      aab: options[:aab] || ENV.fetch("ANDROID_AAB_PATH"),
+      track: options[:track] || "internal",
+      release_status: options[:release_status] || "draft",
+      json_key_data: ENV.fetch("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"),
+      skip_upload_apk: true,
+      skip_upload_metadata: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true,
+      skip_upload_changelogs: true
+    )
+  end
+end
+
+platform :ios do
+  desc "Upload an IPA to TestFlight."
+  lane :beta do |options|
+    api_key = app_store_api_key
+    groups = options[:groups].to_s.split(",").map(&:strip).reject(&:empty?)
+
+    pilot(
+      api_key: api_key,
+      ipa: options[:ipa] || ENV.fetch("IOS_IPA_PATH"),
+      app_identifier: ENV.fetch("BUNDLE_ID"),
+      apple_id: ENV["APP_STORE_APPLE_ID"],
+      distribute_external: truthy?(options[:distribute_external]),
+      groups: groups.empty? ? nil : groups,
+      skip_waiting_for_build_processing: false
+    )
+  end
+
+  desc "Upload an IPA and submit it to App Store review."
+  lane :release do |options|
+    api_key = app_store_api_key
+
+    deliver(
+      api_key: api_key,
+      ipa: options[:ipa] || ENV.fetch("IOS_IPA_PATH"),
+      app_identifier: ENV.fetch("BUNDLE_ID"),
+      submit_for_review: true,
+      automatic_release: truthy?(options[:automatic_release]),
+      skip_metadata: true,
+      skip_screenshots: true,
+      force: true
+    )
+  end
+end

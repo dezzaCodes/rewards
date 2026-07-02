@@ -1,0 +1,99 @@
+name: Upload iOS Build to TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      distribute_external:
+        description: "Distribute to external testers after processing"
+        required: true
+        default: "false"
+      groups:
+        description: "Comma-separated TestFlight group names"
+        required: false
+        default: ""
+      build_number:
+        description: "Optional CI build number override"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      distribute_external:
+        required: true
+        type: string
+      groups:
+        required: false
+        type: string
+      build_number:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  testflight:
+    runs-on: macos-latest
+    env:
+      IOS_TEAM_ID: ${{ vars.IOS_TEAM_ID }}
+      BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+      APP_STORE_APPLE_ID: ${{ vars.APP_STORE_APPLE_ID }}
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+      IOS_DISTRIBUTION_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_P12_BASE64 }}
+      IOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+      IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+          bundler-cache: true
+
+      - name: Install Flutter
+        run: bash ./scripts/install_flutter_sdk.sh
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Precache Flutter iOS artifacts
+        run: flutter precache --ios
+
+      - name: Resolve build metadata
+        env:
+          APP_BUILD_NUMBER_OVERRIDE: ${{ inputs.build_number }}
+        run: bash ./scripts/resolve_build_metadata.sh
+
+      - name: Install iOS signing assets
+        run: bash ./scripts/install_ios_signing_assets.sh
+
+      - name: Normalize iOS signing environment
+        run: |
+          {
+            echo "IOS_TEAM_ID=$(printf '%s' "$IOS_TEAM_ID" | tr -d '\r\n')"
+            echo "BUNDLE_ID=$(printf '%s' "$BUNDLE_ID" | tr -d '\r\n')"
+            echo "IOS_PROFILE_NAME=$(printf '%s' "$IOS_PROFILE_NAME" | tr -d '\r\n')"
+          } >> "$GITHUB_ENV"
+
+      - name: Create Xcode export options
+        run: bash ./scripts/create_ios_export_options.sh
+
+      - name: Build signed IPA
+        run: >
+          flutter build ipa --release
+          --build-name="$APP_BUILD_NAME"
+          --build-number="$APP_BUILD_NUMBER"
+          --export-options-plist=ios/ExportOptions.plist
+
+      - name: Upload to TestFlight
+        run: |
+          IPA_PATH="$(find build/ios/ipa -maxdepth 1 -name '*.ipa' | head -n 1)"
+          echo "Using IPA at $IPA_PATH"
+          bundle exec fastlane ios beta \
+            ipa:"$IPA_PATH" \
+            distribute_external:${{ inputs.distribute_external }} \
+            groups:"${{ inputs.groups }}"

@@ -1,0 +1,63 @@
+name: Build Android App Bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: "Optional CI build number override"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Flutter
+        run: bash ./scripts/install_flutter_sdk.sh
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Install Android SDK components
+        run: bash ./scripts/setup_android_sdk.sh
+
+      - name: Resolve build metadata
+        env:
+          APP_BUILD_NUMBER_OVERRIDE: ${{ inputs.build_number }}
+        run: bash ./scripts/resolve_build_metadata.sh
+
+      - name: Install Android signing assets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: bash ./scripts/install_android_signing_assets.sh
+
+      - name: Build signed app bundle
+        run: >
+          flutter build appbundle --release
+          --build-name="$APP_BUILD_NAME"
+          --build-number="$APP_BUILD_NUMBER"
+
+      - name: Upload app bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-app-bundle-${{ env.APP_BUILD_NAME }}+${{ env.APP_BUILD_NUMBER }}
+          path: build/app/outputs/bundle/release/app-release.aab

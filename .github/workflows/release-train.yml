@@ -1,0 +1,107 @@
+name: Release Train
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_android:
+        description: "Run the Android Google Play release flow"
+        required: true
+        type: boolean
+        default: true
+      android_track:
+        description: "Android Play track or closed-track name"
+        required: true
+        default: internal
+      android_release_status:
+        description: "Android Google Play release status"
+        required: true
+        type: choice
+        default: draft
+        options:
+          - draft
+          - inProgress
+          - halted
+          - completed
+      release_ios_testflight:
+        description: "Run the iOS TestFlight upload flow"
+        required: true
+        type: boolean
+        default: false
+      ios_distribute_external:
+        description: "Distribute the TestFlight build to external testers"
+        required: true
+        type: boolean
+        default: false
+      ios_groups:
+        description: "Comma-separated TestFlight group names"
+        required: false
+        default: ""
+      release_ios_app_store:
+        description: "Run the iOS App Store submission flow"
+        required: true
+        type: boolean
+        default: false
+      ios_automatic_release:
+        description: "Automatically release after App Store approval"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  guardrails:
+    runs-on: ubuntu-latest
+    outputs:
+      build_number: ${{ steps.build_number.outputs.build_number }}
+
+    steps:
+      - name: Validate selected release targets
+        run: |
+          if [[ "${{ inputs.release_android }}" != "true" \
+             && "${{ inputs.release_ios_testflight }}" != "true" \
+             && "${{ inputs.release_ios_app_store }}" != "true" ]]; then
+            echo "Select at least one release target."
+            exit 1
+          fi
+
+          if [[ "${{ inputs.release_ios_testflight }}" == "true" \
+             && "${{ inputs.release_ios_app_store }}" == "true" ]]; then
+            echo "Choose either TestFlight or App Store submission in a single run, not both."
+            exit 1
+          fi
+
+      - name: Resolve shared build number
+        id: build_number
+        run: echo "build_number=$(date -u +%s)" >> "$GITHUB_OUTPUT"
+
+  android:
+    needs: guardrails
+    if: ${{ inputs.release_android }}
+    uses: ./.github/workflows/android-release.yml
+    with:
+      track: ${{ inputs.android_track }}
+      release_status: ${{ inputs.android_release_status }}
+      build_number: ${{ needs.guardrails.outputs.build_number }}
+    secrets: inherit
+
+  ios_testflight:
+    needs: guardrails
+    if: ${{ inputs.release_ios_testflight }}
+    uses: ./.github/workflows/ios-testflight.yml
+    with:
+      distribute_external: ${{ inputs.ios_distribute_external && 'true' || 'false' }}
+      groups: ${{ inputs.ios_groups }}
+      build_number: ${{ needs.guardrails.outputs.build_number }}
+    secrets: inherit
+
+  ios_app_store:
+    needs: guardrails
+    if: ${{ inputs.release_ios_app_store }}
+    uses: ./.github/workflows/ios-release.yml
+    with:
+      automatic_release: ${{ inputs.ios_automatic_release && 'true' || 'false' }}
+      build_number: ${{ needs.guardrails.outputs.build_number }}
+    secrets: inherit

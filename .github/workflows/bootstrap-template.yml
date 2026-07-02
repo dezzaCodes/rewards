@@ -1,0 +1,53 @@
+name: Bootstrap App Template
+
+on:
+  workflow_dispatch:
+    inputs:
+      dart_package:
+        description: "Dart package name, for example acme_customer"
+        required: true
+      display_name:
+        description: "Visible app name, for example Acme Customer"
+        required: true
+      application_id:
+        description: "Bundle/application id, for example com.acme.customer"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Install Flutter
+        run: bash ./scripts/install_flutter_sdk.sh
+
+      - name: Rename the app template
+        run: >
+          bash ./scripts/bootstrap_new_app.sh
+          --dart-package "${{ inputs.dart_package }}"
+          --display-name "${{ inputs.display_name }}"
+          --application-id "${{ inputs.application_id }}"
+
+      - name: Refresh Flutter package metadata
+        run: flutter pub get
+
+      - name: Commit bootstrap changes
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Bootstrap app identifiers"
+          git push origin HEAD:${{ github.ref_name }}
