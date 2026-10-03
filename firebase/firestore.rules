@@ -1,14 +1,64 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isWalletMember(walletId) {
+      return signedIn() && exists(
+        /databases/$(database)/documents/wallets/$(walletId)/members/$(request.auth.uid)
+      );
+    }
+
     match /announcements/{document} {
       allow read: if true;
-      allow write: if request.auth != null;
+      allow write: if signedIn();
     }
 
     // Each signed-in person can only read and write their own rewards data.
     match /rewardsUsers/{uid}/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+
+    // Invite codes are unguessable document ids, so knowing one is what
+    // grants access. Listing is never allowed.
+    match /invites/{code} {
+      allow get: if signedIn();
+      allow create: if isWalletMember(request.resource.data.walletId);
+      allow delete: if isWalletMember(resource.data.walletId);
+    }
+
+    // Shared rewards cards.
+    match /wallets/{walletId} {
+      allow create: if signedIn()
+        && request.resource.data.ownerUid == request.auth.uid;
+      allow read: if isWalletMember(walletId);
+      allow update: if isWalletMember(walletId)
+        && request.resource.data.ownerUid == resource.data.ownerUid;
+
+      match /photos/{photoId} {
+        allow read, write: if isWalletMember(walletId);
+      }
+
+      match /members/{memberUid} {
+        allow read: if isWalletMember(walletId);
+
+        // People add only themselves: either the owner creating the wallet,
+        // or someone holding a valid invite code for this wallet.
+        allow create: if signedIn()
+          && memberUid == request.auth.uid
+          && (
+            getAfter(/databases/$(database)/documents/wallets/$(walletId)).data.ownerUid == request.auth.uid
+            || get(/databases/$(database)/documents/invites/$(request.resource.data.inviteCode)).data.walletId == walletId
+          );
+
+        // Members can leave, and the owner can remove people.
+        allow delete: if signedIn() && (
+          memberUid == request.auth.uid
+          || get(/databases/$(database)/documents/wallets/$(walletId)).data.ownerUid == request.auth.uid
+        );
+      }
     }
   }
 }

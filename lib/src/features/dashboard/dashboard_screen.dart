@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
@@ -12,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../bootstrap.dart';
 import '../../services/cloud_rewards_repository.dart';
+import '../../services/shared_wallet_service.dart';
 
 const _defaultPrograms = <RewardsProgram>[
   RewardsProgram(
@@ -63,12 +65,22 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
+  late final _sharing = SharedWalletService();
   RewardsRepository _repository = RewardsRepository();
   StreamSubscription<User?>? _authSubscription;
+  StreamSubscription<RewardsStore>? _storeSubscription;
   User? _user;
+
+  /// Invite code from a `?join=` link this page was opened with.
+  String? _pendingJoinCode = kIsWeb ? Uri.base.queryParameters['join'] : null;
 
   RewardsStore _store = RewardsStore.empty();
   var _loading = true;
+
+  String? get _walletId => switch (_repository) {
+    CloudRewardsRepository(:final walletId) => walletId,
+    _ => null,
+  };
 
   @override
   void initState() {
@@ -85,15 +97,58 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void dispose() {
     _authSubscription?.cancel();
+    _storeSubscription?.cancel();
     super.dispose();
   }
 
-  void _onAuthChanged(User? user) {
+  Future<void> _onAuthChanged(User? user) async {
     setState(() {
       _user = user;
-      _repository = user == null
-          ? RewardsRepository()
-          : CloudRewardsRepository(uid: user.uid);
+      _loading = true;
+    });
+
+    RewardsRepository repository = RewardsRepository();
+    if (user != null) {
+      try {
+        repository = await _sharing.repositoryFor(user);
+      } catch (error) {
+        debugPrint('Could not find shared cards: $error');
+        repository = CloudRewardsRepository.personal(uid: user.uid);
+      }
+    }
+    if (!mounted || user != _user) {
+      return;
+    }
+
+    _useRepository(repository);
+    _showInviteBanner(visible: user == null && _pendingJoinCode != null);
+    if (user != null && _pendingJoinCode != null) {
+      await _joinFromLink(user);
+    }
+  }
+
+  void _showInviteBanner({required bool visible}) {
+    final messenger = ScaffoldMessenger.of(context)
+      ..hideCurrentMaterialBanner();
+    if (!visible) {
+      return;
+    }
+
+    messenger.showMaterialBanner(
+      MaterialBanner(
+        leading: const Icon(Icons.group_add_outlined),
+        content: const Text(
+          'You were invited to share rewards cards. Sign in to join.',
+        ),
+        actions: [TextButton(onPressed: _signIn, child: const Text('Sign in'))],
+      ),
+    );
+  }
+
+  void _useRepository(RewardsRepository repository) {
+    _storeSubscription?.cancel();
+    setState(() {
+      _repository = repository;
       _loading = true;
     });
     _loadStore();
@@ -111,15 +166,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _store = store;
         _loading = false;
       });
+      _storeSubscription = repository.watch().listen(
+        (store) {
+          if (mounted && repository == _repository) {
+            setState(() => _store = store);
+          }
+        },
+        onError: (Object error) {
+          // Access to shared cards ends when the owner removes someone.
+          if (mounted && repository == _repository && _walletId != null) {
+            _showMessage('You no longer have access to the shared cards.');
+            _onAuthChanged(_user);
+          }
+        },
+      );
     } catch (error) {
       if (!mounted || repository != _repository) {
         return;
       }
 
       setState(() => _loading = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Could not load cards: $error')));
+      _showMessage('Could not load cards: $error');
     }
   }
 
@@ -132,15 +199,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         await FirebaseAuth.instance.signInWithProvider(provider);
       }
     } on FirebaseAuthException catch (error) {
-      if (!mounted ||
-          error.code == 'popup-closed-by-user' ||
+      if (error.code == 'popup-closed-by-user' ||
           error.code == 'cancelled-popup-request') {
         return;
       }
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Sign-in failed: ${error.message}')),
-      );
+      _showMessage('Sign-in failed: ${error.message}');
     }
   }
 
@@ -158,13 +222,136 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  Future<void> _saveStore(RewardsStore store) async {
-    await _repository.save(store);
+  Future<void> _joinFromLink(User user) async {
+    final code = _pendingJoinCode!;
+    _pendingJoinCode = null;
+
+    final current = _repository;
+    if (current is! CloudRewardsRepository) {
+      return;
+    }
+
+    final confirmed = await _confirm(
+      context: context,
+      title: 'Join shared cards?',
+      message: current.walletId == null
+          ? 'You were invited to share rewards cards. Your cards will be '
+                'added to the shared cards, and everyone in it can see and '
+                'change them.'
+          : 'You were invited to a different set of shared cards. Your '
+                'current cards will be added to it, and you will leave the '
+                'cards you share now.',
+      actionLabel: 'Join',
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    await _runSharingAction(
+      () async =>
+          _useRepository(await _sharing.joinWallet(user, code, current)),
+      failure: 'Could not join',
+    );
+  }
+
+  Future<void> _shareCards(User user) async {
+    final current = _repository;
+    if (current is! CloudRewardsRepository) {
+      return;
+    }
+
+    final shared = await _runSharingAction(
+      () => _sharing.createWallet(user, current),
+      failure: 'Could not share cards',
+    );
+    if (shared != null) {
+      _useRepository(shared);
+      await _openAccountSheet();
+    }
+  }
+
+  Future<void> _leaveSharedCards(User user, String walletId) async {
+    final confirmed = await _confirm(
+      context: context,
+      title: 'Leave shared cards?',
+      message:
+          'You will stop seeing the shared cards on all your devices. '
+          'Everyone else keeps them.',
+      actionLabel: 'Leave',
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    await _runSharingAction(() async {
+      await _sharing.leaveWallet(user, walletId);
+      _useRepository(CloudRewardsRepository.personal(uid: user.uid));
+    }, failure: 'Could not leave');
+  }
+
+  Future<T?> _runSharingAction<T>(
+    Future<T> Function() action, {
+    required String failure,
+  }) async {
+    setState(() => _loading = true);
+    try {
+      return await action();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _loading = false);
+      }
+      _showMessage('$failure: $error');
+      return null;
+    }
+  }
+
+  Future<void> _openAccountSheet() async {
+    final user = _user;
+    if (user == null) {
+      return;
+    }
+
+    final walletId = _walletId;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => AccountSheet(
+        user: user,
+        walletId: walletId,
+        sharing: _sharing,
+        onShare: () {
+          Navigator.pop(context);
+          _shareCards(user);
+        },
+        onLeave: () {
+          Navigator.pop(context);
+          _leaveSharedCards(user, walletId!);
+        },
+        onSignOut: () {
+          Navigator.pop(context);
+          _signOut();
+        },
+      ),
+    );
+  }
+
+  void _showMessage(String message) {
     if (!mounted) {
       return;
     }
 
-    setState(() => _store = store);
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<RewardsStore> _updateStore(StoreChange change) async {
+    final store = await _repository.update(change);
+    if (mounted) {
+      setState(() => _store = store);
+    }
+    return store;
   }
 
   Future<void> _openUsers(RewardsProgram program) async {
@@ -175,7 +362,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           program: program,
           store: _store,
           repository: _repository,
-          onStoreChanged: _saveStore,
+          onStoreChanged: _updateStore,
         ),
       ),
     );
@@ -193,7 +380,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     final program = RewardsProgram.custom(name);
-    await _saveStore(_store.copyWith(programs: [..._store.programs, program]));
+    await _updateStore(
+      (store) => store.copyWith(programs: [...store.programs, program]),
+    );
   }
 
   Future<bool> _deleteProgram(RewardsProgram program) async {
@@ -214,12 +403,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       await _repository.deletePhoto(card.photoPath);
     }
 
-    await _saveStore(
-      _store.copyWith(
-        programs: _store.programs
+    await _updateStore(
+      (store) => store.copyWith(
+        programs: store.programs
             .where((item) => item.id != program.id)
             .toList(),
-        cards: _store.cards
+        cards: store.cards
             .where((card) => card.programId != program.id)
             .toList(),
       ),
@@ -234,7 +423,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         title: const Text('Rewards Cards'),
         actions: [
           if (widget.bootstrap.firebaseReady)
-            _AccountButton(user: _user, onSignIn: _signIn, onSignOut: _signOut),
+            _AccountButton(
+              user: _user,
+              shared: _walletId != null,
+              onSignIn: _signIn,
+              onOpenAccount: _openAccountSheet,
+            ),
           const SizedBox(width: 8),
         ],
       ),
@@ -283,7 +477,7 @@ class ProgramUsersScreen extends StatefulWidget {
   final RewardsProgram program;
   final RewardsStore store;
   final RewardsRepository repository;
-  final Future<void> Function(RewardsStore) onStoreChanged;
+  final Future<RewardsStore> Function(StoreChange change) onStoreChanged;
 
   @override
   State<ProgramUsersScreen> createState() => _ProgramUsersScreenState();
@@ -305,13 +499,12 @@ class _ProgramUsersScreenState extends State<ProgramUsersScreen> {
         .toList(growable: false);
   }
 
-  Future<void> _saveStore(RewardsStore store) async {
-    await widget.onStoreChanged(store);
-    if (!mounted) {
-      return;
+  Future<RewardsStore> _updateStore(StoreChange change) async {
+    final store = await widget.onStoreChanged(change);
+    if (mounted) {
+      setState(() => _store = store);
     }
-
-    setState(() => _store = store);
+    return store;
   }
 
   Future<void> _addUser() async {
@@ -358,10 +551,10 @@ class _ProgramUsersScreenState extends State<ProgramUsersScreen> {
         createdAt: now,
       );
 
-      await _saveStore(
-        _store.copyWith(
-          users: [..._store.users, user],
-          cards: [card, ..._store.cards],
+      await _updateStore(
+        (store) => store.copyWith(
+          users: [...store.users, user],
+          cards: [card, ...store.cards],
         ),
       );
       if (!mounted) {
@@ -398,10 +591,10 @@ class _ProgramUsersScreenState extends State<ProgramUsersScreen> {
       await widget.repository.deletePhoto(card.photoPath);
     }
 
-    await _saveStore(
-      _store.copyWith(
-        users: _store.users.where((item) => item.id != user.id).toList(),
-        cards: _store.cards.where((card) => card.userId != user.id).toList(),
+    await _updateStore(
+      (store) => store.copyWith(
+        users: store.users.where((item) => item.id != user.id).toList(),
+        cards: store.cards.where((card) => card.userId != user.id).toList(),
       ),
     );
     return true;
@@ -416,7 +609,7 @@ class _ProgramUsersScreenState extends State<ProgramUsersScreen> {
           user: user,
           store: _store,
           repository: widget.repository,
-          onStoreChanged: _saveStore,
+          onStoreChanged: _updateStore,
         ),
       ),
     );
@@ -483,7 +676,7 @@ class UserCardsScreen extends StatefulWidget {
   final RewardsUser user;
   final RewardsStore store;
   final RewardsRepository repository;
-  final Future<void> Function(RewardsStore) onStoreChanged;
+  final Future<RewardsStore> Function(StoreChange change) onStoreChanged;
 
   @override
   State<UserCardsScreen> createState() => _UserCardsScreenState();
@@ -500,13 +693,12 @@ class _UserCardsScreenState extends State<UserCardsScreen> {
       )
       .toList(growable: false);
 
-  Future<void> _saveStore(RewardsStore store) async {
-    await widget.onStoreChanged(store);
-    if (!mounted) {
-      return;
+  Future<RewardsStore> _updateStore(StoreChange change) async {
+    final store = await widget.onStoreChanged(change);
+    if (mounted) {
+      setState(() => _store = store);
     }
-
-    setState(() => _store = store);
+    return store;
   }
 
   Future<bool> _deleteCard(RewardCard card) async {
@@ -521,9 +713,9 @@ class _UserCardsScreenState extends State<UserCardsScreen> {
     }
 
     await widget.repository.deletePhoto(card.photoPath);
-    await _saveStore(
-      _store.copyWith(
-        cards: _store.cards.where((item) => item.id != card.id).toList(),
+    await _updateStore(
+      (store) => store.copyWith(
+        cards: store.cards.where((item) => item.id != card.id).toList(),
       ),
     );
     return true;
@@ -634,13 +826,15 @@ class _UserListTile extends StatelessWidget {
 class _AccountButton extends StatelessWidget {
   const _AccountButton({
     required this.user,
+    required this.shared,
     required this.onSignIn,
-    required this.onSignOut,
+    required this.onOpenAccount,
   });
 
   final User? user;
+  final bool shared;
   final VoidCallback onSignIn;
-  final VoidCallback onSignOut;
+  final VoidCallback onOpenAccount;
 
   @override
   Widget build(BuildContext context) {
@@ -653,18 +847,250 @@ class _AccountButton extends StatelessWidget {
       );
     }
 
+    final avatar = _UserAvatar(user: user, radius: 16);
+    return IconButton(
+      tooltip: shared ? 'Account and sharing (shared)' : 'Account and sharing',
+      onPressed: onOpenAccount,
+      icon: shared
+          ? Badge(
+              label: const Icon(Icons.group, size: 10, color: Colors.white),
+              child: avatar,
+            )
+          : avatar,
+    );
+  }
+}
+
+class _UserAvatar extends StatelessWidget {
+  const _UserAvatar({required this.user, required this.radius});
+
+  final User user;
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) {
     final label = user.displayName ?? user.email ?? 'Account';
     final photoUrl = user.photoURL;
 
-    return IconButton(
-      tooltip: 'Signed in as $label',
-      onPressed: onSignOut,
-      icon: CircleAvatar(
-        radius: 16,
-        backgroundImage: photoUrl == null ? null : NetworkImage(photoUrl),
-        child: photoUrl == null
-            ? Text(label.characters.first.toUpperCase())
-            : null,
+    return CircleAvatar(
+      radius: radius,
+      backgroundImage: photoUrl == null ? null : NetworkImage(photoUrl),
+      child: photoUrl == null
+          ? Text(label.characters.first.toUpperCase())
+          : null,
+    );
+  }
+}
+
+/// Shows who is signed in and lets them share their cards with others.
+class AccountSheet extends StatefulWidget {
+  const AccountSheet({
+    super.key,
+    required this.user,
+    required this.walletId,
+    required this.sharing,
+    required this.onShare,
+    required this.onLeave,
+    required this.onSignOut,
+  });
+
+  final User user;
+  final String? walletId;
+  final SharedWalletService sharing;
+  final VoidCallback onShare;
+  final VoidCallback onLeave;
+  final VoidCallback onSignOut;
+
+  @override
+  State<AccountSheet> createState() => _AccountSheetState();
+}
+
+class _AccountSheetState extends State<AccountSheet> {
+  Future<List<WalletMember>>? _members;
+  Future<String?>? _inviteCode;
+
+  @override
+  void initState() {
+    super.initState();
+    final walletId = widget.walletId;
+    if (walletId != null) {
+      _members = widget.sharing.members(walletId);
+      _inviteCode = widget.sharing.inviteCode(walletId);
+    }
+  }
+
+  Future<void> _copyLink(String code) async {
+    await Clipboard.setData(
+      ClipboardData(text: SharedWalletService.inviteLink(code).toString()),
+    );
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Invite link copied')));
+  }
+
+  Future<void> _resetLink() async {
+    final confirmed = await _confirm(
+      context: context,
+      title: 'Reset invite link?',
+      message:
+          'The current link will stop working. People who already joined '
+          'keep access.',
+      actionLabel: 'Reset',
+    );
+    if (confirmed) {
+      setState(() {
+        _inviteCode = widget.sharing.resetInvite(widget.walletId!);
+      });
+    }
+  }
+
+  Future<void> _removeMember(WalletMember member) async {
+    final confirmed = await _confirm(
+      context: context,
+      title: 'Remove ${member.name}?',
+      message: 'They will no longer see or change the shared cards.',
+      actionLabel: 'Remove',
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    await widget.sharing.removeMember(widget.walletId!, member.uid);
+    setState(() => _members = widget.sharing.members(widget.walletId!));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final user = widget.user;
+    final textTheme = Theme.of(context).textTheme;
+
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: _UserAvatar(user: user, radius: 20),
+              title: Text(user.displayName ?? 'Signed in'),
+              subtitle: user.email == null ? null : Text(user.email!),
+            ),
+            const Divider(),
+            if (widget.walletId == null)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.group_add_outlined),
+                title: const Text('Share these cards'),
+                subtitle: const Text(
+                  'Get a link so family or friends can see and add cards.',
+                ),
+                onTap: widget.onShare,
+              )
+            else ...[
+              Text('Invite link', style: textTheme.titleSmall),
+              const SizedBox(height: 4),
+              FutureBuilder<String?>(
+                future: _inviteCode,
+                builder: (context, snapshot) {
+                  final code = snapshot.data;
+                  if (code == null) {
+                    return snapshot.connectionState == ConnectionState.done
+                        ? const Text('Could not load the invite link.')
+                        : const LinearProgressIndicator();
+                  }
+
+                  return Row(
+                    children: [
+                      Expanded(
+                        child: SelectableText(
+                          SharedWalletService.inviteLink(code).toString(),
+                          maxLines: 1,
+                          style: textTheme.bodySmall,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton.tonalIcon(
+                        onPressed: () => _copyLink(code),
+                        icon: const Icon(Icons.copy, size: 18),
+                        label: const Text('Copy'),
+                      ),
+                    ],
+                  );
+                },
+              ),
+              Text(
+                'Anyone with this link can join after signing in.',
+                style: textTheme.bodySmall,
+              ),
+              const SizedBox(height: 16),
+              Text('Shared with', style: textTheme.titleSmall),
+              FutureBuilder<List<WalletMember>>(
+                future: _members,
+                builder: (context, snapshot) {
+                  final members = snapshot.data;
+                  if (members == null) {
+                    return snapshot.connectionState == ConnectionState.done
+                        ? const Text('Could not load who has access.')
+                        : const LinearProgressIndicator();
+                  }
+
+                  final isOwner = members.any(
+                    (member) => member.isOwner && member.uid == user.uid,
+                  );
+                  return Column(
+                    children: [
+                      for (final member in members)
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          leading: const Icon(Icons.person_outline),
+                          title: Text(
+                            member.uid == user.uid
+                                ? '${member.name} (you)'
+                                : member.name,
+                          ),
+                          subtitle: member.isOwner ? const Text('Owner') : null,
+                          trailing: isOwner && member.uid != user.uid
+                              ? IconButton(
+                                  tooltip: 'Remove ${member.name}',
+                                  onPressed: () => _removeMember(member),
+                                  icon: const Icon(
+                                    Icons.person_remove_outlined,
+                                  ),
+                                )
+                              : null,
+                        ),
+                    ],
+                  );
+                },
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.link_off),
+                title: const Text('Reset invite link'),
+                onTap: _resetLink,
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.logout),
+                title: const Text('Leave shared cards'),
+                onTap: widget.onLeave,
+              ),
+            ],
+            const Divider(),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.power_settings_new),
+              title: const Text('Sign out'),
+              onTap: widget.onSignOut,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1048,6 +1474,8 @@ String _formatDate(DateTime date) {
       '${local.year}';
 }
 
+typedef StoreChange = RewardsStore Function(RewardsStore store);
+
 class RewardsRepository {
   static const _storeKey = 'rewards_store_v1';
 
@@ -1065,6 +1493,17 @@ class RewardsRepository {
     final preferences = await SharedPreferences.getInstance();
     await preferences.setString(_storeKey, jsonEncode(store.toJson()));
   }
+
+  /// Applies [change] to the latest saved data and returns the result.
+  Future<RewardsStore> update(StoreChange change) async {
+    final store = change(await load());
+    await save(store);
+    return store;
+  }
+
+  /// Emits the store when another device changes it. Data saved only on this
+  /// device never changes elsewhere.
+  Stream<RewardsStore> watch() => const Stream.empty();
 
   Future<String> savePhoto(XFile photo) async {
     if (kIsWeb) {
@@ -1139,6 +1578,20 @@ class RewardsStore {
       programs: programs ?? this.programs,
       users: users ?? this.users,
       cards: cards ?? this.cards,
+    );
+  }
+
+  /// Combines two stores, keeping one copy of anything with the same id.
+  RewardsStore mergedWith(RewardsStore other) {
+    List<T> union<T>(List<T> mine, List<T> theirs, String Function(T) id) {
+      final ids = mine.map(id).toSet();
+      return [...mine, ...theirs.where((item) => !ids.contains(id(item)))];
+    }
+
+    return RewardsStore(
+      programs: union(programs, other.programs, (program) => program.id),
+      users: union(users, other.users, (user) => user.id),
+      cards: union(cards, other.cards, (card) => card.id),
     );
   }
 

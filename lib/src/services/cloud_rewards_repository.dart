@@ -6,50 +6,95 @@ import 'package:image_picker/image_picker.dart';
 
 import '../features/dashboard/dashboard_screen.dart';
 
-/// Stores a signed-in person's rewards data in Firestore so it follows them
-/// across devices.
+/// Stores rewards data in Firestore so it follows people across devices.
 ///
-/// Layout:
-/// - `rewardsUsers/{uid}`: `{store: <json string>, updatedAt}`
-/// - `rewardsUsers/{uid}/photos/{photoId}`: `{data: <base64>, mimeType}`
+/// Data lives under a root document, either a person's own
+/// `rewardsUsers/{uid}` or a shared `wallets/{walletId}`:
+/// - `{root}`: `{store: <json string>, updatedAt}`
+/// - `{root}/photos/{photoId}`: `{data: <base64>, mimeType}`
 ///
 /// Photos live in their own documents to stay under Firestore's 1 MiB
 /// document limit, and are referenced from cards as `cloud:{photoId}`.
 class CloudRewardsRepository extends RewardsRepository {
-  CloudRewardsRepository({required this.uid, FirebaseFirestore? firestore})
-    : _firestore = firestore ?? FirebaseFirestore.instance;
+  CloudRewardsRepository.personal({
+    required String uid,
+    FirebaseFirestore? firestore,
+  }) : this._(
+         (firestore ?? FirebaseFirestore.instance)
+             .collection('rewardsUsers')
+             .doc(uid),
+         walletId: null,
+       );
+
+  CloudRewardsRepository.wallet({
+    required String walletId,
+    FirebaseFirestore? firestore,
+  }) : this._(
+         (firestore ?? FirebaseFirestore.instance)
+             .collection('wallets')
+             .doc(walletId),
+         walletId: walletId,
+       );
+
+  CloudRewardsRepository._(this._root, {required this.walletId});
 
   static const _cloudPrefix = 'cloud:';
 
   // Leaves headroom under the 1 MiB document limit after base64 encoding.
   static const _maxPhotoBytes = 700 * 1024;
 
-  final String uid;
-  final FirebaseFirestore _firestore;
+  /// The shared wallet this repository reads, or null for personal data.
+  final String? walletId;
+
+  final DocumentReference<Map<String, dynamic>> _root;
   final _photoCache = <String, Uint8List>{};
 
-  DocumentReference<Map<String, dynamic>> get _userDoc =>
-      _firestore.collection('rewardsUsers').doc(uid);
-
   CollectionReference<Map<String, dynamic>> get _photos =>
-      _userDoc.collection('photos');
+      _root.collection('photos');
 
   @override
   Future<RewardsStore> load() async {
-    final snapshot = await _userDoc.get();
-    final encoded = snapshot.data()?['store'] as String?;
-    if (encoded != null) {
-      return RewardsStore.fromJson(jsonDecode(encoded) as Map<String, Object?>);
+    final snapshot = await _root.get();
+    final store = _decode(snapshot);
+    if (store != null) {
+      return store;
     }
 
-    return _migrateLocalStore();
+    // First sign-in: copy whatever was saved on this device into the account.
+    if (walletId == null) {
+      final imported = await importStore(
+        await RewardsRepository().load(),
+        from: RewardsRepository(),
+      );
+      await _write(imported);
+      return imported;
+    }
+
+    return RewardsStore.empty();
   }
 
+  /// Emits the store whenever another device changes it.
   @override
-  Future<void> save(RewardsStore store) {
-    return _userDoc.set({
-      'store': jsonEncode(store.toJson()),
-      'updatedAt': FieldValue.serverTimestamp(),
+  Stream<RewardsStore> watch() {
+    return _root
+        .snapshots()
+        .where((snapshot) => !snapshot.metadata.hasPendingWrites)
+        .map(_decode)
+        .where((store) => store != null)
+        .cast<RewardsStore>();
+  }
+
+  /// Applies [change] to the latest saved data inside a transaction, so edits
+  /// made at the same time on other devices are kept.
+  @override
+  Future<RewardsStore> update(
+    RewardsStore Function(RewardsStore store) change,
+  ) {
+    return _root.firestore.runTransaction((transaction) async {
+      final snapshot = await transaction.get(_root);
+      final store = change(_decode(snapshot) ?? RewardsStore.empty());
+      transaction.set(_root, _encode(store), SetOptions(merge: true));
+      return store;
     });
   }
 
@@ -93,6 +138,32 @@ class CloudRewardsRepository extends RewardsRepository {
     return _photoCache[photoId] = base64Decode(data);
   }
 
+  /// Copies the photos of [store] from [from] into this repository and
+  /// returns the store with its photo paths pointing here. Cards whose photo
+  /// can't be found are dropped.
+  Future<RewardsStore> importStore(
+    RewardsStore store, {
+    required RewardsRepository from,
+  }) async {
+    final cards = <RewardCard>[];
+    for (final card in store.cards) {
+      final bytes = await from.loadPhoto(card.photoPath);
+      if (bytes == null) {
+        continue;
+      }
+
+      cards.add(
+        card.copyWith(photoPath: await _uploadPhoto(bytes, 'image/jpeg')),
+      );
+    }
+
+    return store.copyWith(cards: cards);
+  }
+
+  Future<void> _write(RewardsStore store) {
+    return _root.set(_encode(store), SetOptions(merge: true));
+  }
+
   Future<String> _uploadPhoto(Uint8List bytes, String mimeType) async {
     if (bytes.length > _maxPhotoBytes) {
       throw StateError('That photo is too large to sync. Try a smaller one.');
@@ -104,24 +175,17 @@ class CloudRewardsRepository extends RewardsRepository {
     return '$_cloudPrefix${photo.id}';
   }
 
-  /// On first sign-in, copies whatever was saved on this device into the
-  /// account so nothing is lost.
-  Future<RewardsStore> _migrateLocalStore() async {
-    final localStore = await RewardsRepository().load();
-    final cards = <RewardCard>[];
-    for (final card in localStore.cards) {
-      final bytes = await super.loadPhoto(card.photoPath);
-      if (bytes == null) {
-        continue;
-      }
+  static Map<String, Object?> _encode(RewardsStore store) => {
+    'store': jsonEncode(store.toJson()),
+    'updatedAt': FieldValue.serverTimestamp(),
+  };
 
-      cards.add(
-        card.copyWith(photoPath: await _uploadPhoto(bytes, 'image/jpeg')),
-      );
+  static RewardsStore? _decode(DocumentSnapshot<Map<String, dynamic>> doc) {
+    final encoded = doc.data()?['store'] as String?;
+    if (encoded == null) {
+      return null;
     }
 
-    final store = localStore.copyWith(cards: cards);
-    await save(store);
-    return store;
+    return RewardsStore.fromJson(jsonDecode(encoded) as Map<String, Object?>);
   }
 }
