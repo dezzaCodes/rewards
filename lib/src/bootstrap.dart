@@ -45,10 +45,15 @@ class AppBootstrap {
         options: DefaultFirebaseOptions.currentPlatform,
       );
 
-      FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
-
-      final pushNotificationService = PushNotificationService();
-      await pushNotificationService.initialize();
+      // Web push needs a service worker and VAPID key, so skip it there.
+      PushNotificationService? pushNotificationService;
+      if (!kIsWeb) {
+        FirebaseMessaging.onBackgroundMessage(
+          firebaseMessagingBackgroundHandler,
+        );
+        pushNotificationService = PushNotificationService();
+        await pushNotificationService.initialize();
+      }
 
       return AppBootstrap(
         firebaseReady: true,

@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -9,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../bootstrap.dart';
+import '../../services/cloud_rewards_repository.dart';
 
 const _defaultPrograms = <RewardsProgram>[
   RewardsProgram(
@@ -60,7 +63,9 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  final _repository = RewardsRepository();
+  RewardsRepository _repository = RewardsRepository();
+  StreamSubscription<User?>? _authSubscription;
+  User? _user;
 
   RewardsStore _store = RewardsStore.empty();
   var _loading = true;
@@ -68,19 +73,89 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void initState() {
     super.initState();
+    if (widget.bootstrap.firebaseReady) {
+      _authSubscription = FirebaseAuth.instance.authStateChanges().listen(
+        _onAuthChanged,
+      );
+    } else {
+      _loadStore();
+    }
+  }
+
+  @override
+  void dispose() {
+    _authSubscription?.cancel();
+    super.dispose();
+  }
+
+  void _onAuthChanged(User? user) {
+    setState(() {
+      _user = user;
+      _repository = user == null
+          ? RewardsRepository()
+          : CloudRewardsRepository(uid: user.uid);
+      _loading = true;
+    });
     _loadStore();
   }
 
   Future<void> _loadStore() async {
-    final store = await _repository.load();
-    if (!mounted) {
-      return;
-    }
+    final repository = _repository;
+    try {
+      final store = await repository.load();
+      if (!mounted || repository != _repository) {
+        return;
+      }
 
-    setState(() {
-      _store = store;
-      _loading = false;
-    });
+      setState(() {
+        _store = store;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted || repository != _repository) {
+        return;
+      }
+
+      setState(() => _loading = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not load cards: $error')));
+    }
+  }
+
+  Future<void> _signIn() async {
+    try {
+      final provider = GoogleAuthProvider();
+      if (kIsWeb) {
+        await FirebaseAuth.instance.signInWithPopup(provider);
+      } else {
+        await FirebaseAuth.instance.signInWithProvider(provider);
+      }
+    } on FirebaseAuthException catch (error) {
+      if (!mounted ||
+          error.code == 'popup-closed-by-user' ||
+          error.code == 'cancelled-popup-request') {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Sign-in failed: ${error.message}')),
+      );
+    }
+  }
+
+  Future<void> _signOut() async {
+    final confirmed = await _confirm(
+      context: context,
+      title: 'Sign out?',
+      message:
+          'Your cards stay saved in your account. This device will show '
+          'only the cards stored on it.',
+      actionLabel: 'Sign out',
+    );
+    if (confirmed) {
+      await FirebaseAuth.instance.signOut();
+    }
   }
 
   Future<void> _saveStore(RewardsStore store) async {
@@ -155,7 +230,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Rewards Cards')),
+      appBar: AppBar(
+        title: const Text('Rewards Cards'),
+        actions: [
+          if (widget.bootstrap.firebaseReady)
+            _AccountButton(user: _user, onSignIn: _signIn, onSignOut: _signOut),
+          const SizedBox(width: 8),
+        ],
+      ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _loading ? null : _addProgram,
         icon: const Icon(Icons.add),
@@ -480,7 +562,11 @@ class _UserCardsScreenState extends State<UserCardsScreen> {
                     background: const _DeleteSwipeBackground(),
                     confirmDismiss: (_) => _deleteCard(card),
                     onDismissed: (_) => _leaveIfNoCardsRemain(),
-                    child: _RewardCardTile(card: card, program: widget.program),
+                    child: _RewardCardTile(
+                      card: card,
+                      program: widget.program,
+                      repository: widget.repository,
+                    ),
                   );
                 },
               ),
@@ -545,11 +631,55 @@ class _UserListTile extends StatelessWidget {
   }
 }
 
+class _AccountButton extends StatelessWidget {
+  const _AccountButton({
+    required this.user,
+    required this.onSignIn,
+    required this.onSignOut,
+  });
+
+  final User? user;
+  final VoidCallback onSignIn;
+  final VoidCallback onSignOut;
+
+  @override
+  Widget build(BuildContext context) {
+    final user = this.user;
+    if (user == null) {
+      return TextButton.icon(
+        onPressed: onSignIn,
+        icon: const Icon(Icons.cloud_sync_outlined),
+        label: const Text('Sign in to sync'),
+      );
+    }
+
+    final label = user.displayName ?? user.email ?? 'Account';
+    final photoUrl = user.photoURL;
+
+    return IconButton(
+      tooltip: 'Signed in as $label',
+      onPressed: onSignOut,
+      icon: CircleAvatar(
+        radius: 16,
+        backgroundImage: photoUrl == null ? null : NetworkImage(photoUrl),
+        child: photoUrl == null
+            ? Text(label.characters.first.toUpperCase())
+            : null,
+      ),
+    );
+  }
+}
+
 class _RewardCardTile extends StatelessWidget {
-  const _RewardCardTile({required this.card, required this.program});
+  const _RewardCardTile({
+    required this.card,
+    required this.program,
+    required this.repository,
+  });
 
   final RewardCard card;
   final RewardsProgram program;
+  final RewardsRepository repository;
 
   @override
   Widget build(BuildContext context) {
@@ -564,6 +694,7 @@ class _RewardCardTile extends StatelessWidget {
               onTap: () => _showPhoto(context, card.photoPath),
               child: _CardPhoto(
                 photoPath: card.photoPath,
+                repository: repository,
                 fit: BoxFit.cover,
                 errorBuilder: (context, error, stackTrace) => ColoredBox(
                   color: program.color.withValues(alpha: 0.10),
@@ -595,16 +726,18 @@ class _RewardCardTile extends StatelessWidget {
   void _showPhoto(BuildContext context, String photoPath) {
     showDialog<void>(
       context: context,
-      builder: (context) =>
-          Dialog.fullscreen(child: _ZoomedPhotoViewer(photoPath: photoPath)),
+      builder: (context) => Dialog.fullscreen(
+        child: _ZoomedPhotoViewer(photoPath: photoPath, repository: repository),
+      ),
     );
   }
 }
 
 class _ZoomedPhotoViewer extends StatefulWidget {
-  const _ZoomedPhotoViewer({required this.photoPath});
+  const _ZoomedPhotoViewer({required this.photoPath, required this.repository});
 
   final String photoPath;
+  final RewardsRepository repository;
 
   @override
   State<_ZoomedPhotoViewer> createState() => _ZoomedPhotoViewerState();
@@ -649,6 +782,7 @@ class _ZoomedPhotoViewerState extends State<_ZoomedPhotoViewer> {
         child: Center(
           child: _CardPhoto(
             photoPath: widget.photoPath,
+            repository: widget.repository,
             fit: BoxFit.contain,
             errorBuilder: (context, error, stackTrace) =>
                 const Icon(Icons.broken_image_outlined, size: 48),
@@ -659,28 +793,62 @@ class _ZoomedPhotoViewerState extends State<_ZoomedPhotoViewer> {
   }
 }
 
-class _CardPhoto extends StatelessWidget {
+class _CardPhoto extends StatefulWidget {
   const _CardPhoto({
     required this.photoPath,
+    required this.repository,
     required this.fit,
     required this.errorBuilder,
   });
 
   final String photoPath;
+  final RewardsRepository repository;
   final BoxFit fit;
   final ImageErrorWidgetBuilder errorBuilder;
 
   @override
-  Widget build(BuildContext context) {
-    if (photoPath.startsWith('data:')) {
-      return Image.memory(
-        UriData.parse(photoPath).contentAsBytes(),
-        fit: fit,
-        errorBuilder: errorBuilder,
-      );
-    }
+  State<_CardPhoto> createState() => _CardPhotoState();
+}
 
-    return Image.file(File(photoPath), fit: fit, errorBuilder: errorBuilder);
+class _CardPhotoState extends State<_CardPhoto> {
+  late Future<Uint8List?> _bytes = widget.repository.loadPhoto(
+    widget.photoPath,
+  );
+
+  @override
+  void didUpdateWidget(_CardPhoto oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.photoPath != widget.photoPath ||
+        oldWidget.repository != widget.repository) {
+      _bytes = widget.repository.loadPhoto(widget.photoPath);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<Uint8List?>(
+      future: _bytes,
+      builder: (context, snapshot) {
+        final bytes = snapshot.data;
+        if (bytes != null) {
+          return Image.memory(
+            bytes,
+            fit: widget.fit,
+            errorBuilder: widget.errorBuilder,
+          );
+        }
+
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        return widget.errorBuilder(
+          context,
+          snapshot.error ?? 'Photo not found',
+          snapshot.stackTrace,
+        );
+      },
+    );
   }
 }
 
@@ -922,6 +1090,19 @@ class RewardsRepository {
     return destination;
   }
 
+  Future<Uint8List?> loadPhoto(String photoPath) async {
+    if (photoPath.startsWith('data:')) {
+      return UriData.parse(photoPath).contentAsBytes();
+    }
+
+    if (kIsWeb) {
+      return null;
+    }
+
+    final file = File(photoPath);
+    return file.existsSync() ? file.readAsBytes() : null;
+  }
+
   Future<void> deletePhoto(String photoPath) async {
     if (kIsWeb || photoPath.startsWith('data:')) {
       return;
@@ -1087,6 +1268,16 @@ class RewardCard {
   final String programId;
   final String photoPath;
   final DateTime createdAt;
+
+  RewardCard copyWith({String? photoPath}) {
+    return RewardCard(
+      id: id,
+      userId: userId,
+      programId: programId,
+      photoPath: photoPath ?? this.photoPath,
+      createdAt: createdAt,
+    );
+  }
 
   factory RewardCard.fromJson(Map<String, Object?> json) {
     return RewardCard(
