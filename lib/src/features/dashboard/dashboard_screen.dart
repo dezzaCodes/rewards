@@ -601,6 +601,29 @@ class _ProgramUsersScreenState extends State<ProgramUsersScreen> {
   }
 
   Future<void> _openCards(RewardsUser user) async {
+    final cards = _store.cards
+        .where(
+          (card) =>
+              card.programId == widget.program.id && card.userId == user.id,
+        )
+        .toList(growable: false);
+
+    // Each person normally has a single card photo, so show it straight away.
+    if (cards.length == 1) {
+      await Navigator.push<void>(
+        context,
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (context) => _ZoomedPhotoViewer(
+            title: user.name,
+            photoPath: cards.single.photoPath,
+            repository: widget.repository,
+          ),
+        ),
+      );
+      return;
+    }
+
     await Navigator.push<void>(
       context,
       MaterialPageRoute(
@@ -1160,8 +1183,13 @@ class _RewardCardTile extends StatelessWidget {
 }
 
 class _ZoomedPhotoViewer extends StatefulWidget {
-  const _ZoomedPhotoViewer({required this.photoPath, required this.repository});
+  const _ZoomedPhotoViewer({
+    required this.photoPath,
+    required this.repository,
+    this.title,
+  });
 
+  final String? title;
   final String photoPath;
   final RewardsRepository repository;
 
@@ -1194,6 +1222,7 @@ class _ZoomedPhotoViewerState extends State<_ZoomedPhotoViewer> {
         backgroundColor: Colors.white,
         foregroundColor: Colors.black87,
         surfaceTintColor: Colors.transparent,
+        title: widget.title == null ? null : Text(widget.title!),
         leading: IconButton(
           tooltip: 'Close',
           onPressed: () => Navigator.pop(context),
