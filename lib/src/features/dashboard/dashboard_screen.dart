@@ -1182,7 +1182,7 @@ class _RewardCardTile extends StatelessWidget {
   }
 }
 
-class _ZoomedPhotoViewer extends StatefulWidget {
+class _ZoomedPhotoViewer extends StatelessWidget {
   const _ZoomedPhotoViewer({
     required this.photoPath,
     required this.repository,
@@ -1194,27 +1194,6 @@ class _ZoomedPhotoViewer extends StatefulWidget {
   final RewardsRepository repository;
 
   @override
-  State<_ZoomedPhotoViewer> createState() => _ZoomedPhotoViewerState();
-}
-
-class _ZoomedPhotoViewerState extends State<_ZoomedPhotoViewer> {
-  late final TransformationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = TransformationController(
-      Matrix4.identity()..scaleByDouble(1.08, 1.08, 1, 1),
-    );
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
@@ -1222,25 +1201,23 @@ class _ZoomedPhotoViewerState extends State<_ZoomedPhotoViewer> {
         backgroundColor: Colors.white,
         foregroundColor: Colors.black87,
         surfaceTintColor: Colors.transparent,
-        title: widget.title == null ? null : Text(widget.title!),
+        title: title == null ? null : Text(title!),
         leading: IconButton(
           tooltip: 'Close',
           onPressed: () => Navigator.pop(context),
           icon: const Icon(Icons.close),
         ),
       ),
-      body: InteractiveViewer(
-        transformationController: _controller,
-        boundaryMargin: const EdgeInsets.all(80),
-        minScale: 0.8,
-        maxScale: 5,
-        child: Center(
+      // Fill the screen with the whole photo: no cropping, zooming or panning.
+      body: SafeArea(
+        child: SizedBox.expand(
           child: _CardPhoto(
-            photoPath: widget.photoPath,
-            repository: widget.repository,
+            photoPath: photoPath,
+            repository: repository,
             fit: BoxFit.contain,
-            errorBuilder: (context, error, stackTrace) =>
-                const Icon(Icons.broken_image_outlined, size: 48),
+            errorBuilder: (context, error, stackTrace) => const Center(
+              child: Icon(Icons.broken_image_outlined, size: 48),
+            ),
           ),
         ),
       ),
