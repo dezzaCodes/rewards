@@ -585,10 +585,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
         : SafeArea(
             child: ListView.separated(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
-              itemCount: _store.programs.length,
+              itemCount: _store.programs.length + 1,
               separatorBuilder: (context, index) => const SizedBox(height: 10),
               itemBuilder: (context, index) {
-                final program = _store.programs[index];
+                if (index == 0) {
+                  return _AirlineTotals(store: _store);
+                }
+                final program = _store.programs[index - 1];
 
                 return Dismissible(
                   key: ValueKey('program-${program.id}'),
@@ -1010,6 +1013,90 @@ class _UserCardsScreenState extends State<UserCardsScreen> {
                   );
                 },
               ),
+      ),
+    );
+  }
+}
+
+/// Airline points including what the supermarket points convert to:
+/// Flybuys and Everyday Rewards transfer to Velocity and Qantas Frequent
+/// Flyer at half their value.
+class _AirlineTotals extends StatelessWidget {
+  const _AirlineTotals({required this.store});
+
+  final RewardsStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    final velocity = store.totalPoints('velocity');
+    final flybuys = store.totalPoints('flybuys');
+    final qantas = store.totalPoints('qantas-frequent-flyer');
+    final everyday = store.totalPoints('everyday-rewards');
+    if ([velocity, flybuys, qantas, everyday].every((p) => p == null)) {
+      // Keeps the list's spacing consistent while there's nothing to show.
+      return const SizedBox.shrink();
+    }
+
+    return Card(
+      color: Theme.of(context).colorScheme.surface,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Points totals',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            _AirlineTotalRow(
+              airline: 'Velocity',
+              points: velocity ?? 0,
+              partner: 'Flybuys',
+              partnerPoints: flybuys ?? 0,
+            ),
+            _AirlineTotalRow(
+              airline: 'Qantas Frequent Flyer',
+              points: qantas ?? 0,
+              partner: 'Everyday Rewards',
+              partnerPoints: everyday ?? 0,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AirlineTotalRow extends StatelessWidget {
+  const _AirlineTotalRow({
+    required this.airline,
+    required this.points,
+    required this.partner,
+    required this.partnerPoints,
+  });
+
+  final String airline;
+  final int points;
+  final String partner;
+  final int partnerPoints;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final converted = partnerPoints ~/ 2;
+
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      title: Text(airline),
+      subtitle: Text(
+        '${_formatPoints(points)} + ½ of ${_formatPoints(partnerPoints)} '
+        '$partner',
+      ),
+      trailing: Text(
+        _formatPoints(points + converted),
+        style: textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
       ),
     );
   }

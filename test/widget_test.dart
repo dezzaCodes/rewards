@@ -107,4 +107,54 @@ void main() {
 
     expect(find.text('12,450 points in total'), findsOneWidget);
   });
+
+  testWidgets('totals airline points with half the supermarket points', (
+    tester,
+  ) async {
+    Map<String, Object?> person(String id, int points) => {
+      'id': id,
+      'name': id,
+      'points': points,
+      'pointsUpdatedAt': '2026-11-01T00:00:00.000',
+    };
+    Map<String, Object?> card(String userId, String programId) => {
+      'id': '$userId-card',
+      'userId': userId,
+      'programId': programId,
+      'photoPath': 'data:image/png;base64,',
+      'createdAt': '2026-11-01T00:00:00.000',
+    };
+    SharedPreferences.setMockInitialValues({
+      'rewards_store_v1': jsonEncode({
+        'users': [
+          person('va', 10000),
+          person('fb', 4001),
+          person('qf', 2000),
+          person('er', 3000),
+        ],
+        'cards': [
+          card('va', 'velocity'),
+          card('fb', 'flybuys'),
+          card('qf', 'qantas-frequent-flyer'),
+          card('er', 'everyday-rewards'),
+        ],
+      }),
+    });
+    await tester.pumpWidget(
+      App(
+        bootstrap: Future.value(
+          const AppBootstrap(
+            firebaseReady: false,
+            statusMessage: 'Firebase is not configured yet.',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 10,000 + 4,001 / 2 (rounded down) and 2,000 + 3,000 / 2.
+    expect(find.text('12,000'), findsOneWidget);
+    expect(find.text('3,500'), findsOneWidget);
+    expect(find.text('10,000 + ½ of 4,001 Flybuys'), findsOneWidget);
+  });
 }
