@@ -34,7 +34,9 @@ jobs:
 
       # A new service worker per deploy, so phones pick up the new version.
       - name: Stamp service worker with this build
-        run: sed -i "s/__BUILD_ID__/${GITHUB_SHA}/" build/web/sw.js
+        run: |
+          sed -i "s/__BUILD_ID__/${GITHUB_SHA}/" build/web/sw.js
+          echo "${GITHUB_SHA}" > build/web/build_id.txt
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

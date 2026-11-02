@@ -155,6 +155,5 @@ void main() {
     // 10,000 + 4,001 / 2 (rounded down) and 2,000 + 3,000 / 2.
     expect(find.text('12,000'), findsOneWidget);
     expect(find.text('3,500'), findsOneWidget);
-    expect(find.text('10,000 + ½ of 4,001 Flybuys'), findsOneWidget);
   });
 }

@@ -1,10 +1,11 @@
-// Keeps the app's files on the device so it opens instantly, even with a
-// weak signal or none at all. Card data isn't cached here: it comes from
+// Keeps the app's files on the device so it opens quickly, even with a weak
+// signal or none at all. Card data isn't cached here: it comes from
 // Firestore and the app's own saved copy.
 //
-// The CI build replaces __BUILD_ID__ with the commit, so every deploy is a new
-// service worker with its own cache. A new version downloads in the
-// background and is used from the next launch.
+// The CI build replaces __BUILD_ID__ with the commit and writes the same id
+// to build_id.txt, so every deploy is a new service worker with its own
+// cache. Each launch checks build_id.txt first: if a newer version is out,
+// that launch loads it from the network; otherwise it opens from the cache.
 
 const BUILD = '__BUILD_ID__';
 const APP_CACHE = `rewards-app-${BUILD}`;
@@ -33,6 +34,13 @@ const APP_SHELL = [
 ];
 
 const scope = new URL('./', self.location);
+
+// How long a launch waits to find out whether there's a newer version.
+const UPDATE_CHECK_TIMEOUT_MS = 1500;
+
+// Until this time, app files come from the network because this launch is
+// loading a newer version than the one cached.
+let loadFromNetworkUntil = 0;
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -78,8 +86,9 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
   if (request.mode === 'navigate' && url.href.startsWith(scope.href)) {
-    // Every page of the app is the same page; ignore ?join= links etc.
-    event.respondWith(cacheFirst(APP_CACHE, scope.href, request));
+    event.respondWith(openApp(request));
+  } else if (Date.now() < loadFromNetworkUntil && cacheFor(url) === APP_CACHE) {
+    event.respondWith(networkFirst(APP_CACHE, url.href, request));
   } else {
     const cacheName = cacheFor(url);
     if (cacheName) {
@@ -119,9 +128,48 @@ self.addEventListener('message', (event) => {
   );
 });
 
+async function openApp(request) {
+  if ((await latestBuild()) !== BUILD) {
+    // A newer version is out (or this one was never cached): load it all
+    // from the network this time. Its own service worker installs meanwhile
+    // and serves it from the cache on later launches.
+    loadFromNetworkUntil = Date.now() + 30000;
+    return networkFirst(APP_CACHE, scope.href, request);
+  }
+
+  // Every page of the app is the same page; ignore ?join= links etc.
+  return cacheFirst(APP_CACHE, scope.href, request);
+}
+
+// The deployed version, or this one when it can't be checked in time (for
+// example with no signal), so the cached app opens.
+async function latestBuild() {
+  try {
+    const response = await fetch(new URL('build_id.txt', scope), {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(UPDATE_CHECK_TIMEOUT_MS),
+    });
+    return response.ok ? (await response.text()).trim() : BUILD;
+  } catch (_) {
+    return BUILD;
+  }
+}
+
+async function networkFirst(cacheName, key, request) {
+  try {
+    // Skip the HTTP cache so every file comes from the same deploy.
+    return await fetch(request.mode === 'navigate' ? key : request.url, {
+      cache: 'no-cache',
+    });
+  } catch (_) {
+    return cacheFirst(cacheName, key, request);
+  }
+}
+
 function cacheFor(url) {
   if (url.href.startsWith(scope.href)) {
-    return url.pathname.endsWith('/sw.js') ? null : APP_CACHE;
+    const file = url.pathname.split('/').pop();
+    return file === 'sw.js' || file === 'build_id.txt' ? null : APP_CACHE;
   }
   return CDN_PATHS.some((path) => url.href.startsWith(path)) ? CDN_CACHE : null;
 }

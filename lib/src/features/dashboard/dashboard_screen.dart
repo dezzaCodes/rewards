@@ -1055,13 +1055,11 @@ class _AirlineTotals extends StatelessWidget {
             _AirlineTotalRow(
               airline: 'Velocity',
               points: velocity ?? 0,
-              partner: 'Flybuys',
               partnerPoints: flybuys ?? 0,
             ),
             _AirlineTotalRow(
               airline: 'Qantas Frequent Flyer',
               points: qantas ?? 0,
-              partner: 'Everyday Rewards',
               partnerPoints: everyday ?? 0,
             ),
           ],
@@ -1075,30 +1073,23 @@ class _AirlineTotalRow extends StatelessWidget {
   const _AirlineTotalRow({
     required this.airline,
     required this.points,
-    required this.partner,
     required this.partnerPoints,
   });
 
   final String airline;
   final int points;
-  final String partner;
   final int partnerPoints;
 
   @override
   Widget build(BuildContext context) {
-    final textTheme = Theme.of(context).textTheme;
-    final converted = partnerPoints ~/ 2;
-
     return ListTile(
       contentPadding: EdgeInsets.zero,
       title: Text(airline),
-      subtitle: Text(
-        '${_formatPoints(points)} + ½ of ${_formatPoints(partnerPoints)} '
-        '$partner',
-      ),
       trailing: Text(
-        _formatPoints(points + converted),
-        style: textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+        _formatPoints(points + partnerPoints ~/ 2),
+        style: Theme.of(
+          context,
+        ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
       ),
     );
   }
