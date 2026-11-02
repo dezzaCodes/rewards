@@ -58,7 +58,7 @@ class CloudRewardsRepository extends RewardsRepository {
       _root.collection('photos');
 
   /// With [preferCache], returns the copy saved on this device when there is
-  /// one, so the app opens instantly; [watch] then delivers the latest data.
+  /// one, so the app opens instantly. The refresh button loads without it.
   @override
   Future<RewardsStore> load({bool preferCache = false}) async {
     if (preferCache) {
@@ -86,17 +86,6 @@ class CloudRewardsRepository extends RewardsRepository {
     }
 
     return RewardsStore.empty();
-  }
-
-  /// Emits the store whenever another device changes it.
-  @override
-  Stream<RewardsStore> watch() {
-    return _root
-        .snapshots()
-        .where((snapshot) => !snapshot.metadata.hasPendingWrites)
-        .map(_decode)
-        .where((store) => store != null)
-        .cast<RewardsStore>();
   }
 
   /// Applies [change] to the latest saved data inside a transaction, so edits

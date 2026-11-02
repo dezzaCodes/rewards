@@ -156,4 +156,26 @@ void main() {
     expect(find.text('12,000'), findsOneWidget);
     expect(find.text('3,500'), findsOneWidget);
   });
+
+  testWidgets('refresh button reports when everything is up to date', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(
+      App(
+        bootstrap: Future.value(
+          const AppBootstrap(
+            firebaseReady: false,
+            statusMessage: 'Firebase is not configured yet.',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Refresh'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Everything is up to date'), findsOneWidget);
+  });
 }

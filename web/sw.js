@@ -1,17 +1,18 @@
-// Keeps the app's files on the device so it opens quickly, even with a weak
-// signal or none at all. Card data isn't cached here: it comes from
-// Firestore and the app's own saved copy.
+// Keeps the app's files on the device so it opens instantly, even with no
+// signal. The app never updates by itself: the refresh button sends
+// 'update-app', and only then is a newer deployed version downloaded and
+// switched to. Card data isn't cached here: it comes from Firestore and the
+// app's own saved copy.
 //
-// The CI build replaces __BUILD_ID__ with the commit and writes the same id
-// to build_id.txt, so every deploy is a new service worker with its own
-// cache. Each launch checks build_id.txt first: if a newer version is out,
-// that launch loads it from the network; otherwise it opens from the cache.
+// The CI build writes the deployed commit to build_id.txt. It also stamps it
+// below, which only makes each deploy's worker byte-different so phones get
+// this file's latest code; that doesn't change which app files are served.
 
 const BUILD = '__BUILD_ID__';
-const APP_CACHE = `rewards-app-${BUILD}`;
+const META_CACHE = 'rewards-meta';
 
 // The Flutter engine, Firebase SDK and fonts live at versioned URLs whose
-// contents never change, so they are kept across deploys.
+// contents never change, so they are kept across versions.
 const CDN_CACHE = 'rewards-cdn-v1';
 const CDN_PATHS = [
   'https://www.gstatic.com/flutter-canvaskit/',
@@ -35,30 +36,14 @@ const APP_SHELL = [
 
 const scope = new URL('./', self.location);
 
-// How long a launch waits to find out whether there's a newer version.
-const UPDATE_CHECK_TIMEOUT_MS = 1500;
-
-// Until this time, app files come from the network because this launch is
-// loading a newer version than the one cached.
-let loadFromNetworkUntil = 0;
-
 self.addEventListener('install', (event) => {
   event.waitUntil(
     (async () => {
-      const cache = await caches.open(APP_CACHE);
-      // Bypass the HTTP cache so every file comes from this same deploy.
-      await Promise.all(
-        APP_SHELL.map(async (path) => {
-          try {
-            const response = await fetch(path, { cache: 'no-cache' });
-            if (response.ok) {
-              await cache.put(new URL(path, scope), response);
-            }
-          } catch (_) {
-            // Fetched again on first use instead.
-          }
-        }),
-      );
+      // Only the very first install downloads the app; later installs are
+      // just newer code for this worker and keep serving the same version.
+      if (!(await currentVersion())) {
+        await downloadLatest().catch(() => {});
+      }
       await self.skipWaiting();
     })(),
   );
@@ -67,12 +52,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
-      const names = await caches.keys();
-      await Promise.all(
-        names
-          .filter((name) => name.startsWith('rewards-app-') && name !== APP_CACHE)
-          .map((name) => caches.delete(name)),
-      );
+      await deleteOtherAppCaches();
       await self.clients.claim();
     })(),
   );
@@ -86,92 +66,149 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
   if (request.mode === 'navigate' && url.href.startsWith(scope.href)) {
-    event.respondWith(openApp(request));
-  } else if (Date.now() < loadFromNetworkUntil && cacheFor(url) === APP_CACHE) {
-    event.respondWith(networkFirst(APP_CACHE, url.href, request));
-  } else {
-    const cacheName = cacheFor(url);
-    if (cacheName) {
-      event.respondWith(cacheFirst(cacheName, url.href, request));
-    }
+    // Every page of the app is the same page; ignore ?join= links etc.
+    event.respondWith(serveApp(scope.href, request));
+  } else if (isAppFile(url)) {
+    event.respondWith(serveApp(url.href, request));
+  } else if (isCdnFile(url)) {
+    event.respondWith(cacheFirst(CDN_CACHE, url.href, request));
   }
   // Everything else, including Firestore and sign-in, goes to the network.
 });
 
-// On a first visit the page loads before this worker is in control, so it
-// sends the URLs it already loaded to be kept for next time.
 self.addEventListener('message', (event) => {
-  const urls = event.data?.type === 'cache-loaded' ? event.data.urls : [];
-  event.waitUntil(
-    Promise.all(
-      urls.map(async (href) => {
-        const cacheName = cacheFor(new URL(href));
-        if (!cacheName) {
-          return;
-        }
-
-        const cache = await caches.open(cacheName);
-        if (await cache.match(href)) {
-          return;
-        }
-        try {
-          // CORS, so the copy can answer any later request for this URL.
-          const response = await fetch(href, { mode: 'cors' });
-          if (response.ok) {
-            await cache.put(href, response);
-          }
-        } catch (_) {
-          // Kept on a later visit instead.
-        }
-      }),
-    ),
-  );
+  if (event.data?.type === 'update-app') {
+    // From the refresh button: replies whether a newer version was installed.
+    const reply = event.ports[0];
+    event.waitUntil(
+      downloadLatest().then(
+        (updated) => reply?.postMessage({ updated }),
+        (error) => reply?.postMessage({ updated: false, error: String(error) }),
+      ),
+    );
+  } else if (event.data?.type === 'cache-loaded') {
+    // On a first visit the page loads before this worker is in control, so
+    // it sends the URLs it already loaded to be kept for next time.
+    event.waitUntil(keepLoaded(event.data.urls));
+  }
 });
 
-async function openApp(request) {
-  if ((await latestBuild()) !== BUILD) {
-    // A newer version is out (or this one was never cached): load it all
-    // from the network this time. Its own service worker installs meanwhile
-    // and serves it from the cache on later launches.
-    loadFromNetworkUntil = Date.now() + 30000;
-    return networkFirst(APP_CACHE, scope.href, request);
-  }
+// The app version being served: {build, cache}, or null before the first
+// download. Saved in its own cache so it survives the worker restarting.
+let current;
 
-  // Every page of the app is the same page; ignore ?join= links etc.
-  return cacheFirst(APP_CACHE, scope.href, request);
+async function currentVersion() {
+  if (current === undefined) {
+    const saved = await (await caches.open(META_CACHE)).match('current');
+    current = saved ? await saved.json() : null;
+  }
+  return current;
 }
 
-// The deployed version, or this one when it can't be checked in time (for
-// example with no signal), so the cached app opens.
-async function latestBuild() {
-  try {
-    const response = await fetch(new URL('build_id.txt', scope), {
-      cache: 'no-store',
-      signal: AbortSignal.timeout(UPDATE_CHECK_TIMEOUT_MS),
-    });
-    return response.ok ? (await response.text()).trim() : BUILD;
-  } catch (_) {
-    return BUILD;
-  }
+async function currentCache() {
+  return (await currentVersion())?.cache ?? 'rewards-app-unversioned';
 }
 
-async function networkFirst(cacheName, key, request) {
+// Downloads the deployed version, if it isn't the one being served, and
+// switches to it. Returns whether it switched.
+async function downloadLatest() {
+  const latest = await deployedBuild();
+  const serving = await currentVersion();
+  if (serving && serving.build === latest) {
+    return false;
+  }
+
+  const cacheName = `rewards-app-${latest}`;
+  const cache = await caches.open(cacheName);
   try {
     // Skip the HTTP cache so every file comes from the same deploy.
-    return await fetch(request.mode === 'navigate' ? key : request.url, {
-      cache: 'no-cache',
-    });
-  } catch (_) {
-    return cacheFirst(cacheName, key, request);
+    await Promise.all(
+      APP_SHELL.map(async (path) => {
+        const url = new URL(path, scope);
+        const response = await fetch(url, { cache: 'no-cache' });
+        if (!response.ok) {
+          throw new Error(`Couldn't download ${path} (${response.status})`);
+        }
+        await cache.put(url, response);
+      }),
+    );
+  } catch (error) {
+    await caches.delete(cacheName);
+    throw error;
   }
+
+  current = { build: latest, cache: cacheName };
+  await (await caches.open(META_CACHE)).put(
+    'current',
+    new Response(JSON.stringify(current)),
+  );
+  await deleteOtherAppCaches();
+  return true;
 }
 
-function cacheFor(url) {
-  if (url.href.startsWith(scope.href)) {
-    const file = url.pathname.split('/').pop();
-    return file === 'sw.js' || file === 'build_id.txt' ? null : APP_CACHE;
+async function deployedBuild() {
+  const response = await fetch(new URL('build_id.txt', scope), {
+    cache: 'no-store',
+  });
+  // Local builds have no build_id.txt.
+  return response.ok ? (await response.text()).trim() : 'unversioned';
+}
+
+async function deleteOtherAppCaches() {
+  const keep = await currentCache();
+  const names = await caches.keys();
+  await Promise.all(
+    names
+      .filter((name) => name.startsWith('rewards-app-') && name !== keep)
+      .map((name) => caches.delete(name)),
+  );
+}
+
+function isAppFile(url) {
+  if (!url.href.startsWith(scope.href)) {
+    return false;
   }
-  return CDN_PATHS.some((path) => url.href.startsWith(path)) ? CDN_CACHE : null;
+  const file = url.pathname.split('/').pop();
+  return file !== 'sw.js' && file !== 'build_id.txt';
+}
+
+function isCdnFile(url) {
+  return CDN_PATHS.some((path) => url.href.startsWith(path));
+}
+
+async function serveApp(key, request) {
+  return cacheFirst(await currentCache(), key, request);
+}
+
+async function keepLoaded(urls) {
+  const appCache = await currentCache();
+  await Promise.all(
+    urls.map(async (href) => {
+      const url = new URL(href);
+      const cacheName = isAppFile(url)
+        ? appCache
+        : isCdnFile(url)
+          ? CDN_CACHE
+          : null;
+      if (!cacheName) {
+        return;
+      }
+
+      const cache = await caches.open(cacheName);
+      if (await cache.match(href)) {
+        return;
+      }
+      try {
+        // CORS, so the copy can answer any later request for this URL.
+        const response = await fetch(href, { mode: 'cors' });
+        if (response.ok) {
+          await cache.put(href, response);
+        }
+      } catch (_) {
+        // Kept on a later visit instead.
+      }
+    }),
+  );
 }
 
 // A cross-origin <script> loaded without CORS gets an opaque response. That

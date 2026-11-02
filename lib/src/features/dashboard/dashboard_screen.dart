@@ -12,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../bootstrap.dart';
+import '../../services/app_update.dart';
 import '../../services/cloud_rewards_repository.dart';
 import '../../services/photo_cache.dart';
 import '../../services/photo_compressor.dart';
@@ -74,7 +75,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   /// store is current, so screens opened earlier never use a stale one.
   final _repository = ActiveRewardsRepository();
   StreamSubscription<User?>? _authSubscription;
-  StreamSubscription<RewardsStore>? _storeSubscription;
   AppBootstrap? _bootstrap;
   User? _user;
 
@@ -108,7 +108,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void dispose() {
     _authSubscription?.cancel();
-    _storeSubscription?.cancel();
     _entryController.dispose();
     _entryFocus.dispose();
     super.dispose();
@@ -164,33 +163,31 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (previousUid != null || _loading) {
         _useRepository(RewardsRepository());
       }
+    } else if (previousUid == user.uid) {
+      // Keep showing the saved cards; only the refresh button fetches newer
+      // ones. Connect them to Firebase so changes can be saved.
+      if (_repository.target is _SavedCardsRepository) {
+        final walletId = _walletId;
+        _repository.target = walletId == null
+            ? CloudRewardsRepository.personal(uid: user.uid)
+            : CloudRewardsRepository.wallet(walletId: walletId);
+      }
     } else {
-      // Keep showing the saved cards while checking, in the background,
-      // whether this person joined or left shared cards elsewhere.
-      final alreadyShowing = previousUid == user.uid;
+      // Nothing saved on this device for this person yet, so load their
+      // cards once.
+      setState(() => _loading = true);
       CloudRewardsRepository repository;
       try {
         repository = await _sharing.repositoryFor(user);
       } catch (error) {
         debugPrint('Could not find shared cards: $error');
-        final walletId = alreadyShowing ? _walletId : null;
-        repository = walletId == null
-            ? CloudRewardsRepository.personal(uid: user.uid)
-            : CloudRewardsRepository.wallet(walletId: walletId);
+        repository = CloudRewardsRepository.personal(uid: user.uid);
       }
       if (!mounted || user != _user) {
         return;
       }
 
-      if (!alreadyShowing ||
-          _repository.target is! CloudRewardsRepository ||
-          repository.walletId != _walletId) {
-        _useRepository(
-          repository,
-          uid: user.uid,
-          showSpinner: !alreadyShowing || repository.walletId != _walletId,
-        );
-      }
+      _useRepository(repository, uid: user.uid);
     }
 
     _showInviteBanner(visible: user == null && _pendingJoinCode != null);
@@ -217,16 +214,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  void _useRepository(
-    RewardsRepository repository, {
-    String? uid,
-    bool showSpinner = true,
-  }) {
-    _storeSubscription?.cancel();
+  void _useRepository(RewardsRepository repository, {String? uid}) {
     _repository.target = repository;
     setState(() {
       _repositoryUid = uid;
-      _loading = showSpinner;
+      _loading = true;
     });
     if (uid == null) {
       const _Session.signedOut().save();
@@ -244,22 +236,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       _setStore(store);
       _prefetchPhotos(repository, store);
-      _storeSubscription = repository.watch().listen(
-        (store) {
-          if (mounted && repository == _repository.target) {
-            _setStore(store);
-          }
-        },
-        onError: (Object error) {
-          // Access to shared cards ends when the owner removes someone.
-          if (mounted &&
-              repository == _repository.target &&
-              _walletId != null) {
-            _showMessage('You no longer have access to the shared cards.');
-            _onAuthChanged(_user);
-          }
-        },
-      );
     } catch (error) {
       if (!mounted || repository != _repository.target) {
         return;
@@ -282,6 +258,45 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final repository = _repository.target;
     if (uid != null && repository is CloudRewardsRepository) {
       _Session(uid: uid, walletId: repository.walletId, store: store).save();
+    }
+  }
+
+  var _refreshing = false;
+
+  /// The only time the app fetches newer cards or a newer version of itself.
+  Future<void> _refresh() async {
+    if (_refreshing) {
+      return;
+    }
+
+    setState(() => _refreshing = true);
+    try {
+      final user = _user;
+      if (user != null && _firebaseReady) {
+        // Also picks up joining or leaving shared cards on another device.
+        final repository = await _sharing.repositoryFor(user);
+        final store = await repository.load();
+        if (!mounted || user != _user) {
+          return;
+        }
+
+        _repository.target = repository;
+        _repositoryUid = user.uid;
+        _setStore(store);
+        _prefetchPhotos(repository, store);
+      }
+
+      if (await downloadAppUpdate()) {
+        restartApp();
+        return;
+      }
+      _showMessage('Everything is up to date');
+    } catch (error) {
+      _showMessage('Could not refresh: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _refreshing = false);
+      }
     }
   }
 
@@ -564,6 +579,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
       appBar: AppBar(
         title: const Text('Rewards Cards'),
         actions: [
+          _refreshing
+              ? const Padding(
+                  padding: EdgeInsets.all(14),
+                  child: SizedBox.square(
+                    dimension: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                )
+              : IconButton(
+                  tooltip: 'Refresh',
+                  onPressed: _loading ? null : _refresh,
+                  icon: const Icon(Icons.refresh),
+                ),
           if (_firebaseReady && _authResolved)
             _AccountButton(
               user: _user,
@@ -1236,9 +1264,6 @@ class ActiveRewardsRepository extends RewardsRepository {
 
   @override
   Future<RewardsStore> update(StoreChange change) => target.update(change);
-
-  @override
-  Stream<RewardsStore> watch() => target.watch();
 
   @override
   Future<String> savePhoto(XFile photo) => target.savePhoto(photo);
@@ -1994,10 +2019,6 @@ class RewardsRepository {
     await save(store);
     return store;
   }
-
-  /// Emits the store when another device changes it. Data saved only on this
-  /// device never changes elsewhere.
-  Stream<RewardsStore> watch() => const Stream.empty();
 
   Future<String> savePhoto(XFile photo) async {
     if (kIsWeb) {
