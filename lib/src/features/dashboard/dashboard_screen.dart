@@ -144,9 +144,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _authSubscription = FirebaseAuth.instance.authStateChanges().listen(
         _onAuthChanged,
       );
-    } else {
+    } else if (_repositoryUid == null) {
       _useRepository(RewardsRepository());
     }
+    // Otherwise Firebase couldn't start (for example with no signal), so keep
+    // showing the signed-in person's saved cards rather than this device's.
   }
 
   Future<void> _onAuthChanged(User? user) async {

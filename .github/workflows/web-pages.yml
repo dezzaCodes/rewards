@@ -32,6 +32,10 @@ jobs:
       - name: Build web app
         run: flutter build web --release --base-href "/${{ github.event.repository.name }}/"
 
+      # A new service worker per deploy, so phones pick up the new version.
+      - name: Stamp service worker with this build
+        run: sed -i "s/__BUILD_ID__/${GITHUB_SHA}/" build/web/sw.js
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

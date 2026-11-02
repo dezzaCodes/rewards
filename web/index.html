@@ -32,8 +32,58 @@
 
   <title>Rewards Cards</title>
   <link rel="manifest" href="manifest.json">
+
+  <!-- Start downloading the app straight away, not after the loader runs. -->
+  <link rel="preload" href="main.dart.js" as="script">
+
+  <style>
+    html, body { margin: 0; background: #F5F1E7; }
+    /* Shown until Flutter draws its first frame. */
+    #splash {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #F5F1E7;
+      transition: opacity 0.2s;
+    }
+    #splash img { width: 96px; height: 96px; border-radius: 22px; }
+  </style>
 </head>
 <body>
+  <div id="splash" aria-hidden="true">
+    <img src="icons/Icon-192.png" alt="">
+  </div>
+  <script>
+    window.addEventListener('flutter-first-frame', () => {
+      const splash = document.getElementById('splash');
+      if (splash) {
+        splash.style.opacity = '0';
+        setTimeout(() => splash.remove(), 250);
+      }
+    });
+
+    // Keeps the app's files on the device (see sw.js). Local dev servers run
+    // on a port and are left alone.
+    if ('serviceWorker' in navigator && !location.port) {
+      navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' });
+
+      // Hand over what this visit downloaded: once the app has drawn, and
+      // again after Firebase has loaded in the background.
+      const keepLoadedFiles = async () => {
+        const registration = await navigator.serviceWorker.ready;
+        registration.active?.postMessage({
+          type: 'cache-loaded',
+          urls: performance.getEntriesByType('resource').map((e) => e.name),
+        });
+      };
+      window.addEventListener('flutter-first-frame', () => {
+        keepLoadedFiles();
+        setTimeout(keepLoadedFiles, 10000);
+      });
+    }
+  </script>
   <!--
     You can customize the "flutter_bootstrap.js" script.
     This is useful to provide a custom configuration to the Flutter loader
