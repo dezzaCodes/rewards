@@ -5,6 +5,6 @@ import 'src/bootstrap.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final bootstrap = await AppBootstrap.initialize();
-  runApp(App(bootstrap: bootstrap));
+  // Draw straight away; Firebase finishes starting in the background.
+  runApp(App(bootstrap: AppBootstrap.initialize()));
 }

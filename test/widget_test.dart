@@ -9,10 +9,12 @@ void main() {
     SharedPreferences.setMockInitialValues({});
 
     await tester.pumpWidget(
-      const App(
-        bootstrap: AppBootstrap(
-          firebaseReady: false,
-          statusMessage: 'Firebase is not configured yet.',
+      App(
+        bootstrap: Future.value(
+          const AppBootstrap(
+            firebaseReady: false,
+            statusMessage: 'Firebase is not configured yet.',
+          ),
         ),
       ),
     );

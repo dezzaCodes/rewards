@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../features/dashboard/dashboard_screen.dart';
+import 'photo_cache.dart';
 import 'photo_compressor.dart';
 
 /// Stores rewards data in Firestore so it follows people across devices.
@@ -39,7 +40,7 @@ class CloudRewardsRepository extends RewardsRepository {
 
   CloudRewardsRepository._(this._root, {required this.walletId});
 
-  static const _cloudPrefix = 'cloud:';
+  static const _cloudPrefix = RewardsRepository.cloudPhotoPrefix;
 
   // Leaves headroom under the 1 MiB document limit after base64 encoding.
   static const _maxPhotoBytes = 700 * 1024;
@@ -138,12 +139,12 @@ class CloudRewardsRepository extends RewardsRepository {
     }
 
     final photoId = photoPath.substring(_cloudPrefix.length);
-    final cached = _photoCache[photoId];
+    // Photos never change once uploaded, so any copy on this device will do.
+    final cached = _photoCache[photoId] ?? await readCachedPhoto(photoId);
     if (cached != null) {
-      return cached;
+      return _photoCache[photoId] = cached;
     }
 
-    // Photos never change once uploaded, so a copy on this device is enough.
     final photo = _photos.doc(photoId);
     final snapshot = await _readCache(photo) ?? await photo.get();
     final data = snapshot.data()?['data'] as String?;
@@ -151,7 +152,9 @@ class CloudRewardsRepository extends RewardsRepository {
       return null;
     }
 
-    return _photoCache[photoId] = base64Decode(data);
+    final bytes = base64Decode(data);
+    writeCachedPhoto(photoId, bytes).ignore();
+    return _photoCache[photoId] = bytes;
   }
 
   /// Copies the photos of [store] from [from] into this repository and
@@ -193,6 +196,7 @@ class CloudRewardsRepository extends RewardsRepository {
     final photo = _photos.doc();
     await photo.set({'data': base64Encode(bytes), 'mimeType': mimeType});
     _photoCache[photo.id] = bytes;
+    writeCachedPhoto(photo.id, bytes).ignore();
     return '$_cloudPrefix${photo.id}';
   }
 

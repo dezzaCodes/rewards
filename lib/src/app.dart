@@ -6,7 +6,7 @@ import 'features/dashboard/dashboard_screen.dart';
 class App extends StatelessWidget {
   const App({super.key, required this.bootstrap});
 
-  final AppBootstrap bootstrap;
+  final Future<AppBootstrap> bootstrap;
 
   @override
   Widget build(BuildContext context) {
