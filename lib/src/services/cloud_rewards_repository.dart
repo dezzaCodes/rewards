@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../features/dashboard/dashboard_screen.dart';
+import 'photo_compressor.dart';
 
 /// Stores rewards data in Firestore so it follows people across devices.
 ///
@@ -43,6 +44,9 @@ class CloudRewardsRepository extends RewardsRepository {
   // Leaves headroom under the 1 MiB document limit after base64 encoding.
   static const _maxPhotoBytes = 700 * 1024;
 
+  // Photos are compressed below this so they download quickly.
+  static const _targetPhotoBytes = 400 * 1024;
+
   /// The shared wallet this repository reads, or null for personal data.
   final String? walletId;
 
@@ -52,9 +56,19 @@ class CloudRewardsRepository extends RewardsRepository {
   CollectionReference<Map<String, dynamic>> get _photos =>
       _root.collection('photos');
 
+  /// With [preferCache], returns the copy saved on this device when there is
+  /// one, so the app opens instantly; [watch] then delivers the latest data.
   @override
-  Future<RewardsStore> load() async {
-    final snapshot = await _root.get();
+  Future<RewardsStore> load({bool preferCache = false}) async {
+    if (preferCache) {
+      final cached = await _readCache(_root);
+      final store = cached == null ? null : _decode(cached);
+      if (store != null) {
+        return store;
+      }
+    }
+
+    final snapshot = await _root.get(const GetOptions(source: Source.server));
     final store = _decode(snapshot);
     if (store != null) {
       return store;
@@ -129,7 +143,9 @@ class CloudRewardsRepository extends RewardsRepository {
       return cached;
     }
 
-    final snapshot = await _photos.doc(photoId).get();
+    // Photos never change once uploaded, so a copy on this device is enough.
+    final photo = _photos.doc(photoId);
+    final snapshot = await _readCache(photo) ?? await photo.get();
     final data = snapshot.data()?['data'] as String?;
     if (data == null) {
       return null;
@@ -164,7 +180,12 @@ class CloudRewardsRepository extends RewardsRepository {
     return _root.set(_encode(store), SetOptions(merge: true));
   }
 
-  Future<String> _uploadPhoto(Uint8List bytes, String mimeType) async {
+  Future<String> _uploadPhoto(Uint8List original, String mimeType) async {
+    var bytes = original;
+    if (bytes.length > _targetPhotoBytes) {
+      bytes = await compressPhoto(bytes, maxBytes: _targetPhotoBytes);
+      mimeType = 'image/jpeg';
+    }
     if (bytes.length > _maxPhotoBytes) {
       throw StateError('That photo is too large to sync. Try a smaller one.');
     }
@@ -173,6 +194,18 @@ class CloudRewardsRepository extends RewardsRepository {
     await photo.set({'data': base64Encode(bytes), 'mimeType': mimeType});
     _photoCache[photo.id] = bytes;
     return '$_cloudPrefix${photo.id}';
+  }
+
+  /// Reads [doc] from this device's cache, or returns null if it isn't there.
+  static Future<DocumentSnapshot<Map<String, dynamic>>?> _readCache(
+    DocumentReference<Map<String, dynamic>> doc,
+  ) async {
+    try {
+      final snapshot = await doc.get(const GetOptions(source: Source.cache));
+      return snapshot.exists ? snapshot : null;
+    } on FirebaseException {
+      return null;
+    }
   }
 
   static Map<String, Object?> _encode(RewardsStore store) => {

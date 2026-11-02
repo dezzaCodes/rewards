@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../bootstrap.dart';
 import '../../services/cloud_rewards_repository.dart';
+import '../../services/photo_compressor.dart';
 import '../../services/shared_wallet_service.dart';
 
 const _defaultPrograms = <RewardsProgram>[
@@ -74,6 +75,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
   /// Invite code from a `?join=` link this page was opened with.
   String? _pendingJoinCode = kIsWeb ? Uri.base.queryParameters['join'] : null;
 
+  /// Whose cloud cards are showing, or null for cards saved on this device.
+  String? _repositoryUid;
+
+  /// Whether Firebase has reported who is signed in yet.
+  var _authResolved = false;
+
   RewardsStore _store = RewardsStore.empty();
   var _loading = true;
 
@@ -86,6 +93,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void initState() {
     super.initState();
     if (widget.bootstrap.firebaseReady) {
+      _restoreSession();
       _authSubscription = FirebaseAuth.instance.authStateChanges().listen(
         _onAuthChanged,
       );
@@ -101,26 +109,53 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.dispose();
   }
 
-  Future<void> _onAuthChanged(User? user) async {
-    setState(() {
-      _user = user;
-      _loading = true;
-    });
+  /// Shows the cards from last time straight away, before sign-in has been
+  /// restored and before checking which shared cards someone is in.
+  Future<void> _restoreSession() async {
+    final session = await _Session.read();
+    if (!mounted || session == null || _authResolved) {
+      return;
+    }
 
-    RewardsRepository repository = RewardsRepository();
-    if (user != null) {
+    _useRepository(session.repository(), uid: session.uid);
+  }
+
+  Future<void> _onAuthChanged(User? user) async {
+    _authResolved = true;
+    setState(() => _user = user);
+
+    if (user == null) {
+      await _Session.clear();
+      if (_repositoryUid != null || _loading) {
+        _useRepository(RewardsRepository());
+      }
+    } else {
+      // Keep showing cached cards for this person while checking, in the
+      // background, whether they joined or left shared cards elsewhere.
+      final alreadyShowing = _repositoryUid == user.uid;
+      if (!alreadyShowing) {
+        setState(() => _loading = true);
+      }
+
+      CloudRewardsRepository repository;
       try {
         repository = await _sharing.repositoryFor(user);
       } catch (error) {
         debugPrint('Could not find shared cards: $error');
+        if (alreadyShowing) {
+          return;
+        }
         repository = CloudRewardsRepository.personal(uid: user.uid);
       }
-    }
-    if (!mounted || user != _user) {
-      return;
+      if (!mounted || user != _user) {
+        return;
+      }
+
+      if (!alreadyShowing || repository.walletId != _walletId) {
+        _useRepository(repository, uid: user.uid);
+      }
     }
 
-    _useRepository(repository);
     _showInviteBanner(visible: user == null && _pendingJoinCode != null);
     if (user != null && _pendingJoinCode != null) {
       await _joinFromLink(user);
@@ -145,19 +180,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  void _useRepository(RewardsRepository repository) {
+  void _useRepository(RewardsRepository repository, {String? uid}) {
     _storeSubscription?.cancel();
     setState(() {
       _repository = repository;
+      _repositoryUid = uid;
       _loading = true;
     });
+    if (uid != null && repository is CloudRewardsRepository) {
+      _Session(uid: uid, walletId: repository.walletId).save();
+    }
     _loadStore();
   }
 
   Future<void> _loadStore() async {
     final repository = _repository;
     try {
-      final store = await repository.load();
+      final store = await repository.load(preferCache: true);
       if (!mounted || repository != _repository) {
         return;
       }
@@ -166,6 +205,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _store = store;
         _loading = false;
       });
+      _prefetchPhotos(repository, store);
       _storeSubscription = repository.watch().listen(
         (store) {
           if (mounted && repository == _repository) {
@@ -187,6 +227,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       setState(() => _loading = false);
       _showMessage('Could not load cards: $error');
+    }
+  }
+
+  /// Downloads card photos in the background so they open instantly.
+  void _prefetchPhotos(RewardsRepository repository, RewardsStore store) {
+    for (final card in store.cards) {
+      repository.loadPhoto(card.photoPath).ignore();
     }
   }
 
@@ -248,8 +295,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     await _runSharingAction(
-      () async =>
-          _useRepository(await _sharing.joinWallet(user, code, current)),
+      () async => _useRepository(
+        await _sharing.joinWallet(user, code, current),
+        uid: user.uid,
+      ),
       failure: 'Could not join',
     );
   }
@@ -265,7 +314,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       failure: 'Could not share cards',
     );
     if (shared != null) {
-      _useRepository(shared);
+      _useRepository(shared, uid: user.uid);
       await _openAccountSheet();
     }
   }
@@ -285,7 +334,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     await _runSharingAction(() async {
       await _sharing.leaveWallet(user, walletId);
-      _useRepository(CloudRewardsRepository.personal(uid: user.uid));
+      _useRepository(
+        CloudRewardsRepository.personal(uid: user.uid),
+        uid: user.uid,
+      );
     }, failure: 'Could not leave');
   }
 
@@ -529,9 +581,9 @@ class _ProgramUsersScreenState extends State<ProgramUsersScreen> {
 
       final photo = await _picker.pickImage(
         source: source,
-        // Web photos are stored inline in browser storage, so keep them small.
-        imageQuality: kIsWeb ? 70 : 88,
-        maxWidth: kIsWeb ? 1000 : 1800,
+        // On web, photos are compressed when saved instead (see compressPhoto).
+        imageQuality: kIsWeb ? null : 88,
+        maxWidth: kIsWeb ? null : 1800,
       );
       if (photo == null) {
         return;
@@ -843,6 +895,51 @@ class _UserListTile extends StatelessWidget {
         trailing: const Icon(Icons.chevron_right),
       ),
     );
+  }
+}
+
+/// Remembers whose cards were showing last time, so the next visit can show
+/// them from this device's cache without waiting for the network.
+class _Session {
+  const _Session({required this.uid, required this.walletId});
+
+  static const _key = 'rewards_session_v1';
+
+  final String uid;
+  final String? walletId;
+
+  CloudRewardsRepository repository() {
+    final walletId = this.walletId;
+    return walletId == null
+        ? CloudRewardsRepository.personal(uid: uid)
+        : CloudRewardsRepository.wallet(walletId: walletId);
+  }
+
+  static Future<_Session?> read() async {
+    final preferences = await SharedPreferences.getInstance();
+    final encoded = preferences.getString(_key);
+    if (encoded == null) {
+      return null;
+    }
+
+    final json = jsonDecode(encoded) as Map<String, Object?>;
+    return _Session(
+      uid: json['uid']! as String,
+      walletId: json['walletId'] as String?,
+    );
+  }
+
+  Future<void> save() async {
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(
+      _key,
+      jsonEncode({'uid': uid, 'walletId': walletId}),
+    );
+  }
+
+  static Future<void> clear() async {
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.remove(_key);
   }
 }
 
@@ -1485,7 +1582,8 @@ typedef StoreChange = RewardsStore Function(RewardsStore store);
 class RewardsRepository {
   static const _storeKey = 'rewards_store_v1';
 
-  Future<RewardsStore> load() async {
+  /// [preferCache] lets cloud repositories answer from this device first.
+  Future<RewardsStore> load({bool preferCache = false}) async {
     final preferences = await SharedPreferences.getInstance();
     final encoded = preferences.getString(_storeKey);
     if (encoded == null) {
@@ -1513,9 +1611,12 @@ class RewardsRepository {
 
   Future<String> savePhoto(XFile photo) async {
     if (kIsWeb) {
-      final bytes = await photo.readAsBytes();
-      final mimeType = photo.mimeType ?? 'image/jpeg';
-      return 'data:$mimeType;base64,${base64Encode(bytes)}';
+      // Browser storage only holds a few megabytes, so keep photos small.
+      final bytes = await compressPhoto(
+        await photo.readAsBytes(),
+        maxBytes: 300 * 1024,
+      );
+      return 'data:image/jpeg;base64,${base64Encode(bytes)}';
     }
 
     final directory = await getApplicationDocumentsDirectory();

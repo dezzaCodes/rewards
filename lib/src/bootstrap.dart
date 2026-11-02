@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
@@ -44,6 +45,16 @@ class AppBootstrap {
       await Firebase.initializeApp(
         options: DefaultFirebaseOptions.currentPlatform,
       );
+
+      // Keep cards and photos in the browser's IndexedDB so the app opens
+      // from this device instead of waiting on the network.
+      if (kIsWeb) {
+        FirebaseFirestore.instance.settings = const Settings(
+          persistenceEnabled: true,
+          cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
+          webPersistentTabManager: WebPersistentMultipleTabManager(),
+        );
+      }
 
       // Web push needs a service worker and VAPID key, so skip it there.
       PushNotificationService? pushNotificationService;
