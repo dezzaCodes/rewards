@@ -13,7 +13,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../bootstrap.dart';
 import '../../services/cloud_rewards_repository.dart';
-import '../../services/keyboard_primer.dart';
 import '../../services/photo_cache.dart';
 import '../../services/photo_compressor.dart';
 import '../../services/shared_wallet_service.dart';
@@ -110,6 +109,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void dispose() {
     _authSubscription?.cancel();
     _storeSubscription?.cancel();
+    _entryController.dispose();
+    _entryFocus.dispose();
     super.dispose();
   }
 
@@ -472,21 +473,38 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  final _entryController = TextEditingController();
+  final _entryFocus = FocusNode();
+  var _addingProgram = false;
+
+  // Focus has to be requested during the tap itself, or iOS Safari won't
+  // show the keyboard, so this must not await anything first.
+  void _startAddProgram() {
+    _entryController.clear();
+    setState(() => _addingProgram = true);
+    _entryFocus.requestFocus();
+  }
+
+  void _closeEntry() {
+    _entryFocus.unfocus();
+    setState(() => _addingProgram = false);
+  }
+
   Future<void> _addProgram() async {
-    final name = await _showNameDialog(
-      context: context,
-      title: 'Add rewards program',
-      label: 'Program name',
-      actionLabel: 'Add',
-    );
-    if (name == null) {
+    final name = _entryController.text.trim();
+    if (name.isEmpty) {
       return;
     }
 
+    _closeEntry();
     final program = RewardsProgram.custom(name);
-    await _updateStore(
-      (store) => store.copyWith(programs: [...store.programs, program]),
-    );
+    try {
+      await _updateStore(
+        (store) => store.copyWith(programs: [...store.programs, program]),
+      );
+    } catch (error) {
+      _showMessage('Could not add program: $error');
+    }
   }
 
   Future<bool> _deleteProgram(RewardsProgram program) async {
@@ -536,36 +554,51 @@ class _DashboardScreenState extends State<DashboardScreen> {
           const SizedBox(width: 8),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _loading ? null : _addProgram,
-        icon: const Icon(Icons.add),
-        label: const Text('Add program'),
+      floatingActionButton: _addingProgram || _loading
+          ? null
+          : _AddButton(tooltip: 'Add program', onPressed: _startAddProgram),
+      body: Column(
+        children: [
+          Expanded(child: _buildPrograms()),
+          _EntryBar(
+            visible: _addingProgram,
+            controller: _entryController,
+            focusNode: _entryFocus,
+            hint: 'Program name',
+            onSubmit: _addProgram,
+            onCancel: _closeEntry,
+          ),
+        ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : SafeArea(
-              child: ListView.separated(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
-                itemCount: _store.programs.length,
-                separatorBuilder: (context, index) =>
-                    const SizedBox(height: 10),
-                itemBuilder: (context, index) {
-                  final program = _store.programs[index];
-
-                  return Dismissible(
-                    key: ValueKey('program-${program.id}'),
-                    direction: DismissDirection.endToStart,
-                    background: const _DeleteSwipeBackground(),
-                    confirmDismiss: (_) => _deleteProgram(program),
-                    child: _ProgramListTile(
-                      program: program,
-                      onTap: () => _openUsers(program),
-                    ),
-                  );
-                },
-              ),
-            ),
     );
+  }
+
+  Widget _buildPrograms() {
+    return _loading
+        ? const Center(child: CircularProgressIndicator())
+        : SafeArea(
+            bottom: !_addingProgram,
+            child: ListView.separated(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
+              itemCount: _store.programs.length,
+              separatorBuilder: (context, index) => const SizedBox(height: 10),
+              itemBuilder: (context, index) {
+                final program = _store.programs[index];
+
+                return Dismissible(
+                  key: ValueKey('program-${program.id}'),
+                  direction: DismissDirection.endToStart,
+                  background: const _DeleteSwipeBackground(),
+                  confirmDismiss: (_) => _deleteProgram(program),
+                  child: _ProgramListTile(
+                    program: program,
+                    totalPoints: _store.totalPoints(program.id),
+                    onTap: () => _openUsers(program),
+                  ),
+                );
+              },
+            ),
+          );
   }
 }
 
@@ -611,21 +644,87 @@ class _ProgramUsersScreenState extends State<ProgramUsersScreen> {
     return store;
   }
 
-  Future<void> _addUser() async {
-    try {
-      final name = await _showNameDialog(
-        context: context,
-        title: 'Add user',
-        label: 'Name',
-        actionLabel: 'Next',
-      );
-      if (name == null) {
-        return;
-      }
-      if (!mounted) {
-        return;
-      }
+  final _entryController = TextEditingController();
+  final _entryFocus = FocusNode();
+  var _entryVisible = false;
 
+  /// Whose points are being entered, or null when adding a new person.
+  RewardsUser? _pointsUser;
+
+  @override
+  void dispose() {
+    _entryController.dispose();
+    _entryFocus.dispose();
+    super.dispose();
+  }
+
+  // Focus has to be requested during the tap itself, or iOS Safari won't
+  // show the keyboard, so these must not await anything first.
+  void _startAddUser() {
+    _entryController.clear();
+    setState(() {
+      _pointsUser = null;
+      _entryVisible = true;
+    });
+    _entryFocus.requestFocus();
+  }
+
+  void _startEditPoints(RewardsUser user) {
+    final points = user.points?.toString() ?? '';
+    _entryController.value = TextEditingValue(
+      text: points,
+      selection: TextSelection(baseOffset: 0, extentOffset: points.length),
+    );
+    setState(() {
+      _pointsUser = user;
+      _entryVisible = true;
+    });
+    _entryFocus.requestFocus();
+  }
+
+  void _closeEntry() {
+    _entryFocus.unfocus();
+    setState(() => _entryVisible = false);
+  }
+
+  void _submitEntry() {
+    final text = _entryController.text.trim();
+    if (text.isEmpty) {
+      return;
+    }
+
+    final pointsUser = _pointsUser;
+    _closeEntry();
+    if (pointsUser == null) {
+      // Called straight from the tap so the browser allows the photo picker.
+      _addUser(text);
+    } else {
+      _savePoints(pointsUser, int.parse(text));
+    }
+  }
+
+  Future<void> _savePoints(RewardsUser user, int points) async {
+    final now = DateTime.now();
+    try {
+      await _updateStore(
+        (store) => store.copyWith(
+          users: [
+            for (final item in store.users)
+              item.id == user.id ? item.withPoints(points, now) : item,
+          ],
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not save points: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _addUser(String name) async {
+    try {
       final photo = await _picker.pickImage(
         source: ImageSource.gallery,
         // On web, photos are compressed when saved instead (see compressPhoto).
@@ -741,45 +840,64 @@ class _ProgramUsersScreenState extends State<ProgramUsersScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text(widget.program.name)),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _addUser,
-        icon: const Icon(Icons.person_add_alt_1_outlined),
-        label: const Text('Add user'),
+      // An empty program shows its own + button in the middle instead.
+      floatingActionButton: _entryVisible || _programUsers.isEmpty
+          ? null
+          : _AddButton(tooltip: 'Add user', onPressed: _startAddUser),
+      body: Column(
+        children: [
+          Expanded(child: _buildUsers()),
+          _EntryBar(
+            visible: _entryVisible,
+            controller: _entryController,
+            focusNode: _entryFocus,
+            hint: _pointsUser == null
+                ? 'Name'
+                : '${_pointsUser!.name}’s points',
+            numeric: _pointsUser != null,
+            onSubmit: _submitEntry,
+            onCancel: _closeEntry,
+          ),
+        ],
       ),
-      body: SafeArea(
-        child: _programUsers.isEmpty
-            ? Padding(
-                padding: const EdgeInsets.all(16),
-                child: _EmptyState(
-                  icon: Icons.group_add_outlined,
-                  title: 'Add your first user',
-                  message:
-                      'Users let you keep each person’s rewards cards separate under ${widget.program.name}.',
-                  actionLabel: 'Add user',
-                  onPressed: _addUser,
-                ),
-              )
-            : ListView.separated(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
-                itemCount: _programUsers.length,
-                separatorBuilder: (context, index) =>
-                    const SizedBox(height: 10),
-                itemBuilder: (context, index) {
-                  final user = _programUsers[index];
+    );
+  }
 
-                  return Dismissible(
-                    key: ValueKey('user-${user.id}'),
-                    direction: DismissDirection.endToStart,
-                    background: const _DeleteSwipeBackground(),
-                    confirmDismiss: (_) => _deleteUser(user),
-                    child: _UserListTile(
-                      user: user,
-                      onTap: () => _openCards(user),
-                    ),
-                  );
-                },
+  Widget _buildUsers() {
+    return SafeArea(
+      bottom: !_entryVisible,
+      child: _programUsers.isEmpty
+          ? Padding(
+              padding: const EdgeInsets.all(16),
+              child: _EmptyState(
+                icon: Icons.group_add_outlined,
+                title: 'Add your first user',
+                message:
+                    'Users let you keep each person’s rewards cards separate under ${widget.program.name}.',
+                actionLabel: 'Add user',
+                onPressed: _startAddUser,
               ),
-      ),
+            )
+          : ListView.separated(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
+              itemCount: _programUsers.length,
+              separatorBuilder: (context, index) => const SizedBox(height: 10),
+              itemBuilder: (context, index) {
+                final user = _programUsers[index];
+
+                return Dismissible(
+                  key: ValueKey('user-${user.id}'),
+                  direction: DismissDirection.endToStart,
+                  background: const _DeleteSwipeBackground(),
+                  confirmDismiss: (_) => _deleteUser(user),
+                  child: _UserListTile(
+                    user: user,
+                    onTap: () => _openCards(user),
+                    onEditPoints: () => _startEditPoints(user),
+                  ),
+                );
+              },
+            ),
     );
   }
 }
@@ -890,9 +1008,14 @@ class _UserCardsScreenState extends State<UserCardsScreen> {
 }
 
 class _ProgramListTile extends StatelessWidget {
-  const _ProgramListTile({required this.program, required this.onTap});
+  const _ProgramListTile({
+    required this.program,
+    required this.totalPoints,
+    required this.onTap,
+  });
 
   final RewardsProgram program;
+  final int? totalPoints;
   final VoidCallback onTap;
 
   @override
@@ -910,6 +1033,9 @@ class _ProgramListTile extends StatelessWidget {
             context,
           ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
         ),
+        subtitle: totalPoints == null
+            ? null
+            : Text('${_formatPoints(totalPoints!)} points in total'),
         trailing: const Icon(Icons.chevron_right),
       ),
     );
@@ -917,13 +1043,22 @@ class _ProgramListTile extends StatelessWidget {
 }
 
 class _UserListTile extends StatelessWidget {
-  const _UserListTile({required this.user, required this.onTap});
+  const _UserListTile({
+    required this.user,
+    required this.onTap,
+    required this.onEditPoints,
+  });
 
   final RewardsUser user;
   final VoidCallback onTap;
+  final VoidCallback onEditPoints;
 
   @override
   Widget build(BuildContext context) {
+    final points = user.points;
+    final updatedAt = user.pointsUpdatedAt;
+    final textTheme = Theme.of(context).textTheme;
+
     return Card(
       clipBehavior: Clip.antiAlias,
       color: Theme.of(context).colorScheme.surface,
@@ -935,11 +1070,22 @@ class _UserListTile extends StatelessWidget {
         ),
         title: Text(
           user.name,
-          style: Theme.of(
-            context,
-          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+          style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
         ),
-        trailing: const Icon(Icons.chevron_right),
+        subtitle: updatedAt == null
+            ? null
+            : Text('Updated ${_formatDate(updatedAt)}'),
+        trailing: TextButton(
+          onPressed: onEditPoints,
+          child: points == null
+              ? const Text('Add points')
+              : Text(
+                  '${_formatPoints(points)} pts',
+                  style: textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+        ),
       ),
     );
   }
@@ -1536,11 +1682,7 @@ class _EmptyState extends StatelessWidget {
           const SizedBox(height: 6),
           Text(message),
           const SizedBox(height: 18),
-          FilledButton.icon(
-            onPressed: onPressed,
-            icon: const Icon(Icons.add),
-            label: Text(actionLabel),
-          ),
+          _AddButton(tooltip: actionLabel, onPressed: onPressed),
         ],
       ),
     );
@@ -1575,49 +1717,113 @@ class _ProgramBadge extends StatelessWidget {
   }
 }
 
-Future<String?> _showNameDialog({
-  required BuildContext context,
-  required String title,
-  required String label,
-  required String actionLabel,
-}) async {
-  // Must run during the tap that opened this dialog; see primeKeyboard.
-  primeKeyboard();
-  final controller = TextEditingController();
+/// The round + button used for everything that adds something.
+class _AddButton extends StatelessWidget {
+  const _AddButton({required this.tooltip, required this.onPressed});
 
-  return showDialog<String>(
-    context: context,
-    builder: (context) => AlertDialog(
-      title: Text(title),
-      content: TextField(
-        controller: controller,
-        autofocus: true,
-        textCapitalization: TextCapitalization.words,
-        decoration: InputDecoration(labelText: label),
-        onSubmitted: (_) {
-          final value = controller.text.trim();
-          if (value.isNotEmpty) {
-            Navigator.pop(context, value);
-          }
-        },
+  final String tooltip;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return FloatingActionButton(
+      heroTag: null,
+      tooltip: tooltip,
+      shape: const CircleBorder(),
+      onPressed: onPressed,
+      child: const Icon(Icons.add),
+    );
+  }
+}
+
+/// A text field that sits just above the keyboard for quick entry.
+///
+/// It stays in the widget tree while hidden so a tap can focus it straight
+/// away: iOS Safari only opens the keyboard for focus requested during a tap,
+/// which a field built in a later frame (like one in a dialog) misses.
+class _EntryBar extends StatelessWidget {
+  const _EntryBar({
+    required this.visible,
+    required this.controller,
+    required this.focusNode,
+    required this.hint,
+    required this.onSubmit,
+    required this.onCancel,
+    this.numeric = false,
+  });
+
+  final bool visible;
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final String hint;
+  final bool numeric;
+  final VoidCallback onSubmit;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Offstage(
+      offstage: !visible,
+      child: Material(
+        elevation: 8,
+        color: Theme.of(context).colorScheme.surface,
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: controller,
+                    focusNode: focusNode,
+                    keyboardType: numeric
+                        ? TextInputType.number
+                        : TextInputType.text,
+                    textCapitalization: numeric
+                        ? TextCapitalization.none
+                        : TextCapitalization.words,
+                    inputFormatters: numeric
+                        ? [FilteringTextInputFormatter.digitsOnly]
+                        : null,
+                    textInputAction: TextInputAction.done,
+                    decoration: InputDecoration(
+                      hintText: hint,
+                      isDense: true,
+                      border: const OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) => onSubmit(),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Cancel',
+                  onPressed: onCancel,
+                  icon: const Icon(Icons.close),
+                ),
+                IconButton.filled(
+                  tooltip: 'Done',
+                  onPressed: onSubmit,
+                  icon: const Icon(Icons.check),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () {
-            final value = controller.text.trim();
-            if (value.isNotEmpty) {
-              Navigator.pop(context, value);
-            }
-          },
-          child: Text(actionLabel),
-        ),
-      ],
-    ),
-  );
+    );
+  }
+}
+
+String _formatPoints(int points) {
+  final digits = points.toString();
+  final buffer = StringBuffer();
+  for (var i = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 == 0) {
+      buffer.write(',');
+    }
+    buffer.write(digits[i]);
+  }
+  return buffer.toString();
 }
 
 Future<bool> _confirm({
@@ -1771,6 +1977,19 @@ class RewardsStore {
     );
   }
 
+  /// The total points of everyone with a card in [programId], or null if
+  /// nobody there has entered points.
+  int? totalPoints(String programId) {
+    final userIds = cards
+        .where((card) => card.programId == programId)
+        .map((card) => card.userId)
+        .toSet();
+    final balances = users
+        .where((user) => userIds.contains(user.id) && user.points != null)
+        .map((user) => user.points!);
+    return balances.isEmpty ? null : balances.reduce((a, b) => a + b);
+  }
+
   /// Combines two stores, keeping one copy of anything with the same id.
   RewardsStore mergedWith(RewardsStore other) {
     List<T> union<T>(List<T> mine, List<T> theirs, String Function(T) id) {
@@ -1882,19 +2101,46 @@ String _shortNameFor(String name) {
 }
 
 class RewardsUser {
-  const RewardsUser({required this.id, required this.name});
+  const RewardsUser({
+    required this.id,
+    required this.name,
+    this.points,
+    this.pointsUpdatedAt,
+  });
 
   final String id;
   final String name;
 
-  factory RewardsUser.fromJson(Map<String, Object?> json) {
+  /// The person's current points balance, if they've entered one.
+  final int? points;
+  final DateTime? pointsUpdatedAt;
+
+  RewardsUser withPoints(int points, DateTime updatedAt) {
     return RewardsUser(
-      id: json['id']! as String,
-      name: json['name']! as String,
+      id: id,
+      name: name,
+      points: points,
+      pointsUpdatedAt: updatedAt,
     );
   }
 
-  Map<String, Object?> toJson() => {'id': id, 'name': name};
+  factory RewardsUser.fromJson(Map<String, Object?> json) {
+    final updatedAt = json['pointsUpdatedAt'] as String?;
+    return RewardsUser(
+      id: json['id']! as String,
+      name: json['name']! as String,
+      points: json['points'] as int?,
+      pointsUpdatedAt: updatedAt == null ? null : DateTime.parse(updatedAt),
+    );
+  }
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'name': name,
+    if (points != null) 'points': points,
+    if (pointsUpdatedAt != null)
+      'pointsUpdatedAt': pointsUpdatedAt!.toIso8601String(),
+  };
 }
 
 class RewardCard {
