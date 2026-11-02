@@ -54,10 +54,10 @@ void main() {
 
     await tester.enterText(find.byType(TextField), 'Myer one');
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Done'));
+    await tester.tap(find.text('Add'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Myer one'), findsOneWidget);
+    expect(find.widgetWithText(ListTile, 'Myer one'), findsOneWidget);
   });
 
   testWidgets('saves points for a person and totals them on the program', (
@@ -96,7 +96,7 @@ void main() {
     await tester.tap(find.text('Add points'));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), '12450');
-    await tester.tap(find.byTooltip('Done'));
+    await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
 
     expect(find.text('12,450 pts'), findsOneWidget);

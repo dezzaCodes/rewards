@@ -540,6 +540,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        _buildScaffold(),
+        _InputModal(
+          visible: _addingProgram,
+          title: 'Add rewards program',
+          label: 'Program name',
+          actionLabel: 'Add',
+          controller: _entryController,
+          focusNode: _entryFocus,
+          onSubmit: _addProgram,
+          onCancel: _closeEntry,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildScaffold() {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Rewards Cards'),
@@ -554,22 +572,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
           const SizedBox(width: 8),
         ],
       ),
-      floatingActionButton: _addingProgram || _loading
+      floatingActionButton: _loading
           ? null
           : _AddButton(tooltip: 'Add program', onPressed: _startAddProgram),
-      body: Column(
-        children: [
-          Expanded(child: _buildPrograms()),
-          _EntryBar(
-            visible: _addingProgram,
-            controller: _entryController,
-            focusNode: _entryFocus,
-            hint: 'Program name',
-            onSubmit: _addProgram,
-            onCancel: _closeEntry,
-          ),
-        ],
-      ),
+      body: _buildPrograms(),
     );
   }
 
@@ -577,7 +583,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return _loading
         ? const Center(child: CircularProgressIndicator())
         : SafeArea(
-            bottom: !_addingProgram,
             child: ListView.separated(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
               itemCount: _store.programs.length,
@@ -838,34 +843,37 @@ class _ProgramUsersScreenState extends State<ProgramUsersScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text(widget.program.name)),
-      // An empty program shows its own + button in the middle instead.
-      floatingActionButton: _entryVisible || _programUsers.isEmpty
-          ? null
-          : _AddButton(tooltip: 'Add user', onPressed: _startAddUser),
-      body: Column(
-        children: [
-          Expanded(child: _buildUsers()),
-          _EntryBar(
-            visible: _entryVisible,
-            controller: _entryController,
-            focusNode: _entryFocus,
-            hint: _pointsUser == null
-                ? 'Name'
-                : '${_pointsUser!.name}’s points',
-            numeric: _pointsUser != null,
-            onSubmit: _submitEntry,
-            onCancel: _closeEntry,
-          ),
-        ],
-      ),
+    final pointsUser = _pointsUser;
+
+    return Stack(
+      children: [
+        Scaffold(
+          appBar: AppBar(title: Text(widget.program.name)),
+          // An empty program shows its own + button in the middle instead.
+          floatingActionButton: _programUsers.isEmpty
+              ? null
+              : _AddButton(tooltip: 'Add user', onPressed: _startAddUser),
+          body: _buildUsers(),
+        ),
+        _InputModal(
+          visible: _entryVisible,
+          title: pointsUser == null
+              ? 'Add user'
+              : '${pointsUser.name}’s points',
+          label: pointsUser == null ? 'Name' : 'Points',
+          actionLabel: pointsUser == null ? 'Next' : 'Save',
+          numeric: pointsUser != null,
+          controller: _entryController,
+          focusNode: _entryFocus,
+          onSubmit: _submitEntry,
+          onCancel: _closeEntry,
+        ),
+      ],
     );
   }
 
   Widget _buildUsers() {
     return SafeArea(
-      bottom: !_entryVisible,
       child: _programUsers.isEmpty
           ? Padding(
               padding: const EdgeInsets.all(16),
@@ -1736,74 +1744,91 @@ class _AddButton extends StatelessWidget {
   }
 }
 
-/// A text field that sits just above the keyboard for quick entry.
+/// A dialog asking for one piece of text, such as a name or a number.
 ///
-/// It stays in the widget tree while hidden so a tap can focus it straight
-/// away: iOS Safari only opens the keyboard for focus requested during a tap,
-/// which a field built in a later frame (like one in a dialog) misses.
-class _EntryBar extends StatelessWidget {
-  const _EntryBar({
+/// Unlike a dialog pushed with showDialog, it stays in the widget tree while
+/// hidden, so the tap that opens it can focus its field straight away. iOS
+/// Safari only opens the keyboard for focus requested during a tap, which a
+/// pushed dialog's field (built a frame later) always misses.
+class _InputModal extends StatelessWidget {
+  const _InputModal({
     required this.visible,
+    required this.title,
+    required this.label,
+    required this.actionLabel,
     required this.controller,
     required this.focusNode,
-    required this.hint,
     required this.onSubmit,
     required this.onCancel,
     this.numeric = false,
   });
 
   final bool visible;
+  final String title;
+  final String label;
+  final String actionLabel;
   final TextEditingController controller;
   final FocusNode focusNode;
-  final String hint;
   final bool numeric;
   final VoidCallback onSubmit;
   final VoidCallback onCancel;
 
+  static const _duration = Duration(milliseconds: 150);
+
   @override
   Widget build(BuildContext context) {
-    return Offstage(
-      offstage: !visible,
-      child: Material(
-        elevation: 8,
-        color: Theme.of(context).colorScheme.surface,
-        child: SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
-            child: Row(
+    return Positioned.fill(
+      child: PopScope(
+        canPop: !visible,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) {
+            onCancel();
+          }
+        },
+        child: IgnorePointer(
+          ignoring: !visible,
+          child: AnimatedOpacity(
+            opacity: visible ? 1 : 0,
+            duration: _duration,
+            child: Stack(
               children: [
-                Expanded(
-                  child: TextField(
-                    controller: controller,
-                    focusNode: focusNode,
-                    keyboardType: numeric
-                        ? TextInputType.number
-                        : TextInputType.text,
-                    textCapitalization: numeric
-                        ? TextCapitalization.none
-                        : TextCapitalization.words,
-                    inputFormatters: numeric
-                        ? [FilteringTextInputFormatter.digitsOnly]
-                        : null,
-                    textInputAction: TextInputAction.done,
-                    decoration: InputDecoration(
-                      hintText: hint,
-                      isDense: true,
-                      border: const OutlineInputBorder(),
+                ModalBarrier(
+                  color: Colors.black54,
+                  onDismiss: onCancel,
+                  semanticsLabel: 'Cancel',
+                ),
+                AnimatedScale(
+                  scale: visible ? 1 : 0.95,
+                  duration: _duration,
+                  curve: Curves.easeOut,
+                  child: AlertDialog(
+                    title: Text(title),
+                    content: TextField(
+                      controller: controller,
+                      focusNode: focusNode,
+                      keyboardType: numeric
+                          ? TextInputType.number
+                          : TextInputType.text,
+                      textCapitalization: numeric
+                          ? TextCapitalization.none
+                          : TextCapitalization.words,
+                      inputFormatters: numeric
+                          ? [FilteringTextInputFormatter.digitsOnly]
+                          : null,
+                      decoration: InputDecoration(labelText: label),
+                      onSubmitted: (_) => onSubmit(),
                     ),
-                    onSubmitted: (_) => onSubmit(),
+                    actions: [
+                      TextButton(
+                        onPressed: onCancel,
+                        child: const Text('Cancel'),
+                      ),
+                      FilledButton(
+                        onPressed: onSubmit,
+                        child: Text(actionLabel),
+                      ),
+                    ],
                   ),
-                ),
-                IconButton(
-                  tooltip: 'Cancel',
-                  onPressed: onCancel,
-                  icon: const Icon(Icons.close),
-                ),
-                IconButton.filled(
-                  tooltip: 'Done',
-                  onPressed: onSubmit,
-                  icon: const Icon(Icons.check),
                 ),
               ],
             ),
